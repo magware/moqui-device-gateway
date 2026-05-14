@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.moqui.device.gateway</groupId>
+    <artifactId>moqui-device-gateway</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>jar</packaging>
+
+    <name>Moqui Device Gateway</name>
+    <description>
+        Standalone Apache Camel gateway on Quarkus for high-level MQTT and OPC UA device requests.
+        It shares the same PostgreSQL/YugabyteDB database model used by Moqui, persists inbound device data,
+        executes outbound write/subscribe requests, and exports device configuration files with optional REST callbacks.
+    </description>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+        <quarkus.platform.group-id>io.quarkus.platform</quarkus.platform.group-id>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Quarkus BOM (includes Camel Quarkus BOM) -->
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-bom</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-camel-bom</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Camel core -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-core</artifactId>
+        </dependency>
+        <!-- SQL component (JDBC named-parameter queries) -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-sql</artifactId>
+        </dependency>
+        <!-- JSON marshalling / unmarshalling (Jackson) -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-jackson</artifactId>
+        </dependency>
+        <!--
+            MQTT support via Eclipse Paho MQTT v5.
+            Camel Quarkus 3.34.6 provides the MQTT5 extension, but not a parallel `camel-quarkus-paho`
+            artifact for MQTT v3.x. If MQTT v3 support becomes mandatory, it should be introduced as a
+            deliberate compatibility task with runtime validation rather than assumed here.
+        -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-paho-mqtt5</artifactId>
+        </dependency>
+        <!-- OPC UA client/server support via Eclipse Milo -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-milo</artifactId>
+        </dependency>
+        <!-- Synchronous in-VM endpoints -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-direct</artifactId>
+        </dependency>
+        <!-- Async in-VM queue endpoints (used as SEDA defaults for testing) -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-seda</artifactId>
+        </dependency>
+        <!-- HTTP producer for Moqui REST API callbacks -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-http</artifactId>
+        </dependency>
+        <!-- Local file output (recipe export) -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-file</artifactId>
+        </dependency>
+        <!-- SFTP (recipe transfer to PLC) -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-ftp</artifactId>
+        </dependency>
+        <!-- Bean processor support -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-bean</artifactId>
+        </dependency>
+        <!-- XML IO DSL: load routes from camel/*.xml in resources -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-xml-io-dsl</artifactId>
+        </dependency>
+        <!-- Groovy language support for inline transforms in XML routes -->
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-groovy</artifactId>
+        </dependency>
+
+        <!-- PostgreSQL / YugabyteDB JDBC (YB is PG-wire compatible) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-postgresql</artifactId>
+        </dependency>
+
+        <!-- REST API (trigger endpoints + health) -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-rest-jackson</artifactId>
+        </dependency>
+
+        <!-- Health check at /q/health -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-smallrye-health</artifactId>
+        </dependency>
+
+        <!-- Tests -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-junit</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.rest-assured</groupId>
+            <artifactId>rest-assured</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.camel.quarkus</groupId>
+            <artifactId>camel-quarkus-mock</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- Eclipse Paho MQTT5 client — used directly in integration tests to publish messages -->
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.mqttv5.client</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Awaitility — clean async assertions without Thread.sleep (version from BOM) -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>${quarkus.platform.group-id}</groupId>
+                <artifactId>quarkus-maven-plugin</artifactId>
+                <version>${quarkus.platform.version}</version>
+                <extensions>true</extensions>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build</goal>
+                            <goal>generate-code</goal>
+                            <goal>generate-code-tests</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <systemPropertyVariables>
+                        <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <maven.home>${maven.home}</maven.home>
+                        <quarkus.bootstrap.workspace-discovery>false</quarkus.bootstrap.workspace-discovery>
+                    </systemPropertyVariables>
+                    <!--
+                        Integration tests require live infrastructure (Artemis MQTT + PostgreSQL/YugabyteDB).
+                        Run them explicitly:
+                          mvn test -Dtest=MqttInboundIntegrationTest -Dquarkus.profile=integration
+                          mvn test -Dtest=GatewaySeededRouteIntegrationTest -Dquarkus.profile=integration
+                    -->
+                    <excludes>
+                        <exclude>**/MqttInboundIntegrationTest.java</exclude>
+                        <exclude>**/GatewaySeededRouteIntegrationTest.java</exclude>
+                        <exclude>**/OpcUaGatewayIntegrationTest.java</exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

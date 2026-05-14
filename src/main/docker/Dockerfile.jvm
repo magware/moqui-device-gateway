@@ -1,0 +1,49 @@
+####
+# JVM-mode Dockerfile for moqui-device-gateway (Quarkus).
+#
+# Build the JAR first:
+#   mvn package -DskipTests
+#
+# Build the image:
+#   docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
+#
+# Run locally:
+#   docker run --rm -p 8081:8081 \
+#     --network moqui_default \
+#     -e QUARKUS_DATASOURCE_JDBC_URL=jdbc:postgresql://moqui-database:5432/moqui \
+#     -e MQTT_READ_CONSUME_URI=seda:mqtt-read-device-request-in \
+#     -e GATEWAY_API_AUTH_TOKEN=change-me \
+#     moqui-device-gateway:latest
+####
+FROM eclipse-temurin:21-jre-alpine
+
+ENV LANGUAGE='en_US:en'
+
+# Install curl for the health check
+RUN apk add --no-cache curl
+
+WORKDIR /deployments
+
+# Quarkus fast-jar layout
+COPY --chown=185 target/quarkus-app/lib/                  /deployments/lib/
+COPY --chown=185 target/quarkus-app/*.jar                 /deployments/
+COPY --chown=185 target/quarkus-app/app/                  /deployments/app/
+COPY --chown=185 target/quarkus-app/quarkus/              /deployments/quarkus/
+
+# Mount points for external config and persisted logs
+RUN mkdir -p /deployments/config /deployments/logs \
+    && chown -R 185:0 /deployments
+VOLUME ["/deployments/config"]
+
+EXPOSE 8081
+
+# Use a non-root user (uid 185 = quarkus convention)
+USER 185
+
+ENV JAVA_OPTS_APPEND="-Dquarkus.http.host=0.0.0.0 -Djava.util.logging.manager=org.jboss.logmanager.LogManager"
+ENV JAVA_APP_JAR="/deployments/quarkus-run.jar"
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8081/q/health/live || exit 1
+
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS_APPEND -jar $JAVA_APP_JAR"]
