@@ -786,6 +786,43 @@ mqtt.read.afterStore.uri=seda:mqtt-read-device-request-notify
 # DEVICE_REQUEST.TIMEOUT = 10  (seconds for write retry)
 ```
 
+### API token — never store in application.properties
+
+`gateway.api.auth.token` must be overridden at runtime. Do not commit the real token.
+
+**Option A — environment variable** (simplest; works with `docker run` and Compose):
+
+```bash
+docker run ... -e GATEWAY_API_AUTH_TOKEN=mysecrettoken moqui-device-gateway:latest
+```
+
+Quarkus maps `GATEWAY_API_AUTH_TOKEN` → `gateway.api.auth.token` automatically.
+
+**Option B — Docker secret** (recommended for Swarm / production Compose):
+
+```yaml
+# docker-compose.yml
+services:
+  moqui-device-gateway:
+    image: moqui-device-gateway:latest
+    secrets:
+      - gateway_api_token
+    environment:
+      GATEWAY_API_AUTH_TOKEN_FILE: /run/secrets/gateway_api_token
+
+secrets:
+  gateway_api_token:
+    external: true
+```
+
+> Quarkus does not natively read `_FILE` secrets; use a thin entrypoint wrapper or
+> read the file and export it as an environment variable before starting the JVM:
+> ```sh
+> export GATEWAY_API_AUTH_TOKEN=$(cat /run/secrets/gateway_api_token)
+> exec java $JAVA_OPTS_APPEND -jar $JAVA_APP_JAR
+> ```
+> Replace the `ENTRYPOINT` line in `Dockerfile.jvm` with a shell script that does this.
+
 ### SFTP recipe export
 
 ```properties

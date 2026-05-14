@@ -30,10 +30,10 @@ COPY --chown=185 target/quarkus-app/*.jar                 /deployments/
 COPY --chown=185 target/quarkus-app/app/                  /deployments/app/
 COPY --chown=185 target/quarkus-app/quarkus/              /deployments/quarkus/
 
-# Mount points for external config and persisted logs
-RUN mkdir -p /deployments/config /deployments/logs \
+# Mount points for external config, persisted logs, and subscription state
+RUN mkdir -p /deployments/config /deployments/logs /deployments/data \
     && chown -R 185:0 /deployments
-VOLUME ["/deployments/config"]
+VOLUME ["/deployments/config", "/deployments/data"]
 
 EXPOSE 8081
 
