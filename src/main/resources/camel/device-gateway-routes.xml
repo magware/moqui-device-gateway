@@ -231,6 +231,13 @@ along with this software (see the LICENSE.md file). If not, see
         <setBody>
             <groovy>body instanceof java.util.Map &amp;&amp; !body.containsKey('deviceId') ? new java.util.LinkedHashMap(body).tap { put('deviceId', null) } : body</groovy>
         </setBody>
+        <!-- Persist export IDs before the SQL query replaces the body -->
+        <setProperty name="exportDeviceId">
+            <groovy>body?.deviceId ?: 'device'</groovy>
+        </setProperty>
+        <setProperty name="exportDeviceRuleId">
+            <groovy>body?.deviceRuleId ?: 'rule'</groovy>
+        </setProperty>
         <toD uri="{{device.config.export.fetch.uri}}"/>
         <transform>
             <groovy>body instanceof Map &amp;&amp; body.containsKey('rowList') ? body.rowList : body</groovy>
@@ -242,7 +249,7 @@ along with this software (see the LICENSE.md file). If not, see
             <groovy>body.collect { "${it['parameterName']}:=${it['parameterValue']}" }.join('\n')</groovy>
         </transform>
         <setHeader name="CamelFileName">
-            <simple>{{device.config.export.filename}}</simple>
+            <groovy>"${exchange.properties.exportDeviceId}_${exchange.properties.exportDeviceRuleId}.txt"</groovy>
         </setHeader>
         <to uri="direct:transfer-file"/>
         <setBody>
@@ -269,6 +276,21 @@ along with this software (see the LICENSE.md file). If not, see
     <route id="transfer-device-content">
         <from uri="direct:transfer-device-content"/>
         <toD uri="${header.gatewayTransferUri}" pattern="InOnly"/>
+    </route>
+
+    <!--
+        PLC log subscribe trigger route.
+        Registers a dynamic MQTT consumer that forwards LoggerFacade batches to
+        plc-log-ingest, bypassing the standard parameter normalization used by
+        mqtt-subscribe-device-request.
+        Triggered by a DeviceRequest with purposeEnumId='DrpLogging' and
+        requestTypeEnumId in (DrtSubscribe, DrtEvent, DrtStateChange, DrtCyclic).
+        The DeviceRequest.query field must contain the MQTT topic (e.g. 'moqui-plc').
+        DeviceRequestItems are not used — the LoggerFacade batch is self-describing.
+    -->
+    <route id="plc-log-subscribe-device-request">
+        <from uri="direct:plc-log-subscribe-device-request"/>
+        <to uri="bean:gatewayRequestService?method=subscribePlcLog"/>
     </route>
 
     <!--
@@ -357,7 +379,7 @@ def withoutSource = []
             deviceLogId : java.util.UUID.randomUUID().toString(),
             deviceId    : loggerName,
             payload     : mapper.writeValueAsString(entry),
-            sequenceNum : i,
+            sequenceNum : System.currentTimeMillis() + i,
             observedDate: ts
         ]
     }

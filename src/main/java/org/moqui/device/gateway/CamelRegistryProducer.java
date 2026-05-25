@@ -9,17 +9,21 @@ import jakarta.inject.Inject;
 import jakarta.inject.Named;
 
 /**
- * Registers the Quarkus default DataSource in the Camel registry under the name
- * configured by {@code camel.sql.datasource} (default: {@code moquiDataSource}).
+ * Registers both Quarkus DataSources in the Camel registry:
+ *  - {@code moquiDataSource}    → default datasource (production Moqui DB: DEVICE_REQUEST, PARAMETER, DEVICE_CONFIG, …)
+ *  - {@code moquiLogDataSource} → "log" named datasource (telemetry DB: PARAMETER_LOG, DEVICE_LOG)
  *
- * This keeps the standalone gateway routes and beans aligned around the same Camel
- * registry name for JDBC access:
- *   sql:{{query}}?dataSource=#{{camel.sql.datasource}}
+ * SQL route URIs reference one of these by name:
+ *   sql:{{query}}?dataSource=#{{camel.sql.datasource}}      (production DB)
+ *   sql:{{query}}?dataSource=#{{camel.sql.log.datasource}}  (log DB)
  *
- * We inject {@code AgroalDataSource} (the Quarkus-specific subtype) rather than
- * plain {@code DataSource} to avoid CDI ambiguity: our {@code @Produces @Named} method
- * would otherwise create a second {@code @Default DataSource} bean alongside the
- * synthetic Agroal bean, causing a {@code AmbiguousResolutionException} at boot.
+ * Both datasources can point to the same DB during testing (standalone moqui-log-database).
+ * In production, point the default to the main Moqui DB and "log" to the separate telemetry DB.
+ *
+ * We inject {@code AgroalDataSource} rather than plain {@code DataSource} to avoid CDI
+ * ambiguity: a {@code @Produces @Named} method on plain {@code DataSource} would create a
+ * second {@code @Default} bean alongside the synthetic Agroal bean, causing
+ * {@code AmbiguousResolutionException} at boot.
  */
 @ApplicationScoped
 public class CamelRegistryProducer {
@@ -27,9 +31,19 @@ public class CamelRegistryProducer {
     @Inject
     AgroalDataSource agroalDataSource;
 
+    @Inject
+    @io.quarkus.agroal.DataSource("log")
+    AgroalDataSource logAgroalDataSource;
+
     @Produces
     @Named("moquiDataSource")
     DataSource moquiDataSource() {
         return agroalDataSource;
+    }
+
+    @Produces
+    @Named("moquiLogDataSource")
+    DataSource moquiLogDataSource() {
+        return logAgroalDataSource;
     }
 }

@@ -141,8 +141,9 @@ public class GatewayResource {
                 .entity(Map.of("error", "deviceRuleSetId is required"))
                 .build();
         }
-        // ensure deviceId key is present (possibly null) so the SQL named parameter resolves
+        // ensure optional SQL named parameters are present (null = no filter)
         params.putIfAbsent("deviceId", null);
+        params.putIfAbsent("deviceRuleId", null);
 
         @SuppressWarnings("unchecked")
         Map<String, Object> result = producer.requestBody("direct:run-device-config-export", params, Map.class);
@@ -162,6 +163,7 @@ public class GatewayResource {
     }
 
     private String resolveSubscribeRoute(GatewayRequestService.RequestContext context) {
+        if ("DrpLogging".equals(context.purposeEnumId())) return "direct:plc-log-subscribe-device-request";
         return isOpcua(context) ? "direct:opcua-subscribe-device-request" : "direct:mqtt-subscribe-device-request";
     }
 

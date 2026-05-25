@@ -84,8 +84,9 @@ public class GatewayRequestService {
         for (String requestName : subscriptionPersistence.loadAll()) {
             try {
                 RequestContext context = loadRequestContext(requestName);
-                boolean opcua = isOpcuaContext(context);
-                if (opcua) {
+                if (isPlcLogContext(context)) {
+                    subscribePlcLog(context);
+                } else if (isOpcuaContext(context)) {
                     subscribeOpcUa(context);
                 } else {
                     subscribeMqtt(context);
@@ -177,6 +178,51 @@ public class GatewayRequestService {
         logger.warnf("OPC UA write to %s failed after %d attempt(s) in %dms: %s",
             publishUri, attempts, timeoutMs, detail);
         throw new IllegalStateException("OPC UA write to " + publishUri + " failed: " + detail, lastException);
+    }
+
+    /**
+     * Registers a dynamic MQTT consumer that forwards raw LoggerFacade batches
+     * (CODESYS numbered-object format) directly to {@code direct:plc-log-ingest}.
+     * Used for DeviceRequests with {@code purposeEnumId = 'DrpLogging'}.
+     * The DeviceRequest.query field is the MQTT topic; no items are required.
+     */
+    public Map<String, Object> subscribePlcLog(RequestContext context) {
+        assertSubscribeRequest(context);
+        if (context.brokerUri() == null || context.brokerUri().isBlank()) {
+            throw new IllegalArgumentException("DeviceRequest " + context.requestName() + " does not define brokerUri.");
+        }
+        List<String> topicList = resolvePlcLogTopicList(context);
+        if (topicList.isEmpty()) {
+            throw new IllegalArgumentException("DeviceRequest " + context.requestName() + " has no topic (set the QUERY field to the MQTT topic, e.g. 'moqui-plc').");
+        }
+
+        List<String> routeIdList = new ArrayList<>();
+        List<String> consumerUriList = new ArrayList<>();
+        for (int index = 0; index < topicList.size(); index++) {
+            String topic = topicList.get(index);
+            String routeId = routePrefix(context.requestName()) + index;
+            String consumerUri = buildEndpointUri(context.brokerUri(), topic);
+
+            Object lock = subscriptionLocks.computeIfAbsent(routeId, k -> new Object());
+            synchronized (lock) {
+                if (camelContext.getRoute(routeId) == null) {
+                    addPlcLogSubscriptionRoute(routeId, consumerUri, context);
+                }
+            }
+
+            if (camelContext.getRoute(routeId) != null) {
+                routeIdList.add(routeId);
+                consumerUriList.add(consumerUri);
+            }
+        }
+
+        subscriptionPersistence.save(context.requestName());
+        return Map.of(
+            "status", "completed",
+            "routeId", "plc-log-subscribe-device-request",
+            "routeIdList", routeIdList,
+            "consumerUriList", consumerUriList
+        );
     }
 
     public Map<String, Object> subscribeMqtt(RequestContext context) {
@@ -572,6 +618,56 @@ public class GatewayRequestService {
             && (context.brokerUri().startsWith("opcua:")
                 || context.brokerUri().startsWith("milo-client:")
                 || context.brokerUri().startsWith("opc.tcp://"));
+    }
+
+    /**
+     * A DeviceRequest is a PLC log request when its purposeEnumId is 'DrpLogging'.
+     * These requests use the LoggerFacade batch format and are routed to plc-log-ingest
+     * rather than the standard parameter normalization pipeline.
+     */
+    private boolean isPlcLogContext(RequestContext context) {
+        return "DrpLogging".equals(context.purposeEnumId());
+    }
+
+    /**
+     * For PLC log subscriptions the topic comes solely from requestQuery —
+     * DeviceRequestItems are not used (the LoggerFacade batch is self-describing).
+     */
+    private List<String> resolvePlcLogTopicList(RequestContext context) {
+        if (context.requestQuery() != null && !context.requestQuery().isBlank()) {
+            return List.of(context.requestQuery());
+        }
+        return List.of();
+    }
+
+    /**
+     * Adds a dynamic MQTT consumer route that converts the raw bytes to a String,
+     * parses the JSON LoggerFacade batch, and forwards it to direct:plc-log-ingest.
+     * Normalization is intentionally skipped — plc-log-ingest handles the batch format.
+     */
+    private void addPlcLogSubscriptionRoute(String routeId, String consumerUri, RequestContext context) {
+        try {
+            camelContext.addRoutes(new RouteBuilder() {
+                @Override
+                public void configure() {
+                    from(consumerUri).routeId(routeId)
+                        .doTry()
+                            .convertBodyTo(String.class)
+                            .unmarshal().json()
+                            .setProperty("gateway.routeId").constant(routeId)
+                            .setProperty("gateway.requestName").constant(context.requestName())
+                            .to("direct:plc-log-ingest")
+                        .doCatch(Exception.class)
+                            .log(org.apache.camel.LoggingLevel.WARN,
+                                "Discarding PLC log payload for request " + context.requestName()
+                                + " after runtime failure: ${exception.message}")
+                        .end();
+                }
+            });
+        } catch (Exception e) {
+            logger.warnf(e, "Failed to register PLC log subscription route %s for request %s on %s — skipping.",
+                routeId, context.requestName(), consumerUri);
+        }
     }
 
     private void warnIfStaticMqttConsumerActive() {
