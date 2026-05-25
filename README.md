@@ -393,6 +393,80 @@ file.transfer.uri.2=sftp:admin@plc2.example.com:22/recipe
 
 ---
 
+### 7. PLC diagnostic log ingest (CODESYS LoggerFacade)
+
+The `plc-log-consumer` route subscribes to an MQTT topic where the CODESYS
+`LoggerFacade` appender publishes structured log batches. Each batch is a
+numbered JSON object:
+
+```json
+{
+  "1": {
+    "logEventDate": "DT#2026-05-25-10:00:00",
+    "loggerName": "hvac",
+    "source": "tempSensor",
+    "type": 1,
+    "repeatCount": 1,
+    "numericValue": 21.5
+  },
+  "2": {
+    "logEventDate": "DT#2026-05-25-10:00:01",
+    "loggerName": "hvac",
+    "source": "",
+    "type": 0,
+    "repeatCount": 1,
+    "message": "Standby state entered"
+  }
+}
+```
+
+**Routing by `source` field:**
+
+| `source` | Storage | Key mapping |
+|---|---|---|
+| non-empty | `PARAMETER_LOG` | `parameterId = loggerName.source` |
+| empty | `DEVICE_LOG` | `deviceId = loggerName`, `payload = full JSON entry` |
+
+**Payload type mapping (source entries → PARAMETER_LOG):**
+
+| `type` | PLC field | `PARAMETER_LOG` column |
+|---|---|---|
+| `0` | `message` | `symbolicValue` |
+| `1` | `numericValue` | `numericValue` |
+| `2` | `enumValue` | `symbolicValue` (as string) |
+
+The `DT#YYYY-MM-DD-HH:MM:SS` timestamp literal is parsed and stored as
+`observedDate`. When parsing fails the column is left null and
+`CURRENT_TIMESTAMP` is used by the SQL `COALESCE`.
+
+Before writing to `PARAMETER_LOG` the route ensures idempotently (ON CONFLICT DO NOTHING):
+1. A shared `PlcLoggerDef` row in `PARAMETER_DEF`.
+2. One `PARAMETER` row per unique `loggerName.source` combination.
+
+**Configuration:**
+
+```properties
+# Enable in integration or production profiles
+plc.log.route.autoStartup=false
+plc.log.consume.uri=seda:plc-log-in   # override with real broker URI
+
+# Integration profile override example:
+# %integration.plc.log.route.autoStartup=true
+# %integration.plc.log.consume.uri=paho-mqtt5:moqui-plc?brokerUrl=tcp://broker:1883&clientId=camel-plc-log-in&userName=user&password=secret
+```
+
+**Error policy:** the route never stops. The two write paths are isolated in
+independent `doTry` blocks so a failure in one does not suppress the other:
+
+- Path A failure (PARAMETER_LOG write) → batch A discarded, `recordError()` called, Path B still runs
+- Path B failure (DEVICE_LOG write) → batch B discarded, `recordError()` called, Path A unaffected
+- Transform failure (malformed batch) → whole batch discarded before either path runs
+
+`inboundErrorNotifier` tracks consecutive failures and sends a REST notification to Moqui
+after the configured threshold, then clears automatically on the first successful write.
+
+---
+
 ## REST API reference
 
 All endpoints require the gateway to be running at `http://host:8081`.
@@ -514,6 +588,9 @@ When a subscription route is registered for a single item, the raw value (unwrap
 | `opcua-subscribe-device-request` | `direct:opcua-subscribe-device-request` | Delegates to `gatewayRequestService.subscribeOpcUa()` |
 | `run-device-config-export` | `direct:run-device-config-export` | SQL fetch → Codesys recipe format → `direct:transfer-file` |
 | `transfer-file` | `direct:transfer-file` | File/SFTP transfer to primary endpoint, optionally to secondary |
+| `transfer-device-content` | `direct:transfer-device-content` | Streams device content (G-Code, firmware, CNC programs) to a dynamic URI set by the caller |
+| `plc-log-consumer` | `plc.log.consume.uri` (broker or SEDA) | PLC diagnostic log consumer; auto-start controlled by `plc.log.route.autoStartup` |
+| `plc-log-ingest` | `direct:plc-log-ingest` | Transforms CODESYS LoggerFacade batch format; routes entries with `source` to `PARAMETER_LOG` (Path A) and entries without `source` to `DEVICE_LOG` (Path B); the two paths are isolated — a failure in one does not suppress the other |
 | `device-request-consumer-{name}-{n}` | Dynamic (MQTT topic or OPC UA node) | Per-item subscription routes registered at runtime |
 
 ---
@@ -622,6 +699,21 @@ OPC UA endpoint URIs for write and subscribe are built at runtime from `DEVICE_C
 The `DEVICE_REQUEST.TIMEOUT` column controls the write retry window (in seconds, default 5 s).
 The `DEVICE_REQUEST.POLLING_INTERVAL` column sets the OPC UA `samplingInterval` for subscriptions (ms).
 
+### PLC diagnostic log ingest
+
+| Property | Default | Description |
+|---|---|---|
+| `plc.log.route.autoStartup` | `false` | Start PLC log consumer on startup |
+| `plc.log.consume.uri` | `seda:plc-log-in` | MQTT endpoint for CODESYS LoggerFacade batches; override with real broker URI |
+| `plc.log.store.ensure.parameter.def.uri` | SQL `INSERT INTO PARAMETER_DEF … ON CONFLICT DO NOTHING` | Idempotent upsert of the shared `PlcLoggerDef` definition row |
+| `plc.log.store.ensure.parameter.uri` | SQL `INSERT INTO PARAMETER … ON CONFLICT DO NOTHING` | Idempotent upsert of one `PARAMETER` row per unique `loggerName.source` |
+| `plc.log.store.device.log.uri` | SQL `INSERT INTO DEVICE_LOG …` | Storage for no-source entries (plain text log lines) |
+
+The `%integration` and `%local` profiles set `plc.log.route.autoStartup=true` and point
+`plc.log.consume.uri` to the real Artemis broker on the `moqui-plc` topic.
+
+---
+
 ### Device config export
 
 | Property | Default | Description |
@@ -718,6 +810,10 @@ Reads always continue regardless of DB failures — no inbound flow is ever bloc
 | OPC UA inbound | endpoint/network failure | possible gaps | dynamic route survives (`bridgeErrorHandler=true`) |
 | OPC UA inbound | value normalisation failure | one event lost | route stays alive; warning logged |
 | OPC UA inbound | DB failure | one sample lost | route stays alive; error tracked by notifier |
+| PLC log inbound | malformed batch (transform) | whole batch lost | route stays alive |
+| PLC log inbound (source entries) | PARAMETER ensure failure | source batch lost | route stays alive; DEVICE_LOG path unaffected; error tracked by notifier |
+| PLC log inbound (source entries) | PARAMETER_LOG write failure | source batch lost | route stays alive; DEVICE_LOG path unaffected; error tracked by notifier |
+| PLC log inbound (no-source entries) | DEVICE_LOG write failure | no-source batch lost | route stays alive; PARAMETER_LOG path unaffected; error tracked by notifier |
 | Outbound MQTT write | publish failure | write not completed | caller gets 503; runtime stays healthy |
 | Outbound OPC UA write | write failure / timeout | write not completed | caller gets 503; runtime stays healthy |
 | Dynamic subscribe | route registration failure | subscription not active | caller gets 503; other routes unaffected |
@@ -846,8 +942,16 @@ gateway.inbound.error.notification.uri=http://moqui-server:8080/rest/s1/org/moqu
 ```bash
 cd moqui-device-gateway
 mvn package -DskipTests
-# JVM JAR: target/quarkus-app/quarkus-run.jar
+# JVM artifact: target/quarkus-app/quarkus-run.jar
 ```
+
+> **Note on Maven warning:** if Maven prints _"The Maven extensions for the Quarkus Maven
+> plugin are not enabled"_ despite `<extensions>true</extensions>` being present in `pom.xml`,
+> it can be safely ignored — it is a known false positive in certain Maven versions and does
+> not affect the build output. `BUILD SUCCESS` is the authoritative result.
+
+> **Cross-platform note:** `target/` contains platform-specific native libraries (e.g. brotli4j).
+> Always build on the target OS. Do not copy a `target/` directory built on Windows to a Linux host.
 
 ---
 
@@ -862,11 +966,114 @@ mvn quarkus:dev
 # Health:  http://localhost:8081/q/health
 ```
 
-### Production (JVM)
+### JVM direct (integration profile, on the gateway host)
 
 ```bash
-java -jar target/quarkus-app/quarkus-run.jar
+java -Dquarkus.profile=integration \
+     -jar target/quarkus-app/quarkus-run.jar
 ```
+
+The `%integration` profile activates live PostgreSQL, real Artemis MQTT endpoints
+(`localhost:1883`), PLC log ingestion, and DEBUG logging for Camel categories.
+
+For a non-standard DB port (e.g. the standalone DB container on port `5434`):
+
+```bash
+java -Dquarkus.profile=integration \
+     -Dquarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5434/moqui \
+     -jar target/quarkus-app/quarkus-run.jar
+```
+
+### Local developer machine (broker on remote host)
+
+```bash
+java -Dquarkus.profile=local \
+     -jar target/quarkus-app/quarkus-run.jar
+```
+
+The `%local` profile connects to a local PostgreSQL and a remote Artemis broker at
+`192.168.101.62:1883`.
+
+---
+
+## Standalone deployment (Docker)
+
+The gateway ships with two Docker Compose files under `docker/`:
+
+| File | Description |
+|---|---|
+| `docker/db-compose.yml` | PostgreSQL 18 with `init.sql` schema; exposes port `5434` on the host |
+| `docker/gateway-compose.yml` | Gateway container; reaches the DB by container name on the shared `moqui-gateway-net` network |
+
+Both compose files join the Docker network `moqui-gateway-net` (created by `db-compose.yml`).
+
+**Prerequisites on the target server:** Java 21+, Maven 3.9+, Docker.
+
+> **Database note:** `db-compose.yml` starts a bare PostgreSQL instance (no init scripts —
+> same pattern as `moqui-framework/docker/postgres-compose.yml`). The schema must be applied
+> once manually after first startup (step 4 below).
+> In production the gateway connects directly to the main Moqui DB; Moqui's entity engine
+> creates all required tables (`PARAMETER`, `PARAMETER_LOG`, `DEVICE_REQUEST`, etc.) on its own
+> startup — no manual schema init is needed.
+
+```bash
+# 1. Build the JVM artifact (must be done on Linux)
+cd moqui-device-gateway
+mvn package -DskipTests
+
+# 2. Build the Docker image
+docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
+
+# 3. Start the DB (also creates moqui-gateway-net)
+docker compose -f docker/db-compose.yml up -d
+
+# 4. Apply the schema (standalone testing only — run once after first DB start)
+#    From the server:
+docker exec -i moqui-log-database psql -U moqui -d moqui < src/main/resources/db/init.sql
+#    Or from a Windows machine via PowerShell:
+#    Get-Content "...\src\main\resources\db\init.sql" | ssh user@host "docker exec -i moqui-log-database psql -U moqui -d moqui"
+
+# 5. Verify schema
+docker exec moqui-log-database psql -U moqui -d moqui -c "\dt"
+
+# 6. Start the gateway
+docker compose -f docker/gateway-compose.yml up -d
+
+# 7. Follow startup logs
+docker logs -f moqui-device-gateway
+```
+
+Expected startup output:
+
+```
+INFO  Route: plc-log-consumer started and consuming from: paho-mqtt5://moqui-plc?...
+INFO  Route: mqtt-read-device-request-consumer started and consuming from: paho-mqtt5://iot/parameters/in?...
+INFO  Camel started with N routes
+```
+
+**Updating after a source change:**
+
+```bash
+mvn package -DskipTests
+docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
+docker compose -f docker/gateway-compose.yml up -d --force-recreate
+```
+
+**Environment variable overrides** (Quarkus MicroProfile Config convention —
+dots and hyphens → underscores, all uppercase):
+
+| Property | Env var |
+|---|---|
+| `quarkus.datasource.jdbc.url` | `QUARKUS_DATASOURCE_JDBC_URL` |
+| `gateway.api.auth.token` | `GATEWAY_API_AUTH_TOKEN` |
+| `mqtt.read.consume.uri` | `MQTT_READ_CONSUME_URI` |
+| `mqtt.write.publish.uri` | `MQTT_WRITE_PUBLISH_URI` |
+| `plc.log.consume.uri` | `PLC_LOG_CONSUME_URI` |
+| `plc.log.route.autoStartup` | `PLC_LOG_ROUTE_AUTOSTARTUP` |
+
+The `gateway-compose.yml` already overrides the MQTT broker URIs to use the host LAN IP
+(`192.168.101.62`) so that broker connections resolve correctly from inside the container.
+Adjust that IP to match your actual broker host if it differs.
 
 ---
 
@@ -928,9 +1135,13 @@ This walkthrough triggers real DB writes using only `mosquitto_pub` and `psql`.
 **Step 1 — start the infrastructure**
 
 ```bash
-# from moqui-framework/docker (adjust paths as needed)
-docker compose -f postgres-compose.yml -p moqui up -d moqui-database
-docker compose -f activemq-compose.yml -p moqui up -d
+# Standalone DB (see docker/db-compose.yml)
+cd moqui-device-gateway
+docker compose -f docker/db-compose.yml up -d
+
+# Or, when using the full Moqui stack (moqui-framework/docker):
+# docker compose -f postgres-compose.yml -p moqui up -d moqui-database
+# docker compose -f activemq-compose.yml -p moqui up -d
 ```
 
 **Step 2 — verify seed data exists**
@@ -1070,16 +1281,19 @@ The `gateway-subscriptions` readiness check reports:
 ## Integration test baseline
 
 ```bash
-# Start PostgreSQL and Artemis
+# Option A — standalone DB only (no full Moqui stack required)
+cd moqui-device-gateway
+docker compose -f docker/db-compose.yml up -d
+mvn quarkus:dev -Dquarkus.profile=integration \
+    -Dquarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5434/moqui
+
+# Option B — full Moqui stack (PostgreSQL + Artemis via moqui-framework/docker)
 cd moqui-framework/docker
 docker compose -f postgres-compose.yml -p moqui up -d moqui-database
 docker compose -f activemq-compose.yml -p moqui up -d
-
-# Load Moqui schema + seed data (once)
-cd moqui-framework
-./gradlew load
-
-# Run gateway with integration profile
+# Load schema + seed data (once)
+cd moqui-framework && ./gradlew load
+# Run gateway
 cd moqui-device-gateway
 mvn quarkus:dev -Dquarkus.profile=integration
 ```

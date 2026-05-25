@@ -270,4 +270,174 @@ along with this software (see the LICENSE.md file). If not, see
         <from uri="direct:transfer-device-content"/>
         <toD uri="${header.gatewayTransferUri}" pattern="InOnly"/>
     </route>
+
+    <!--
+        PLC diagnostic log consumer (CODESYS LoggerFacade batch format).
+        Receives batches published by the PLC LoggerFacade MQTT appender and
+        forwards them to the plc-log-ingest route for transformation and storage.
+
+        PLC batch format:
+          { "1": { "logEventDate": "DT#YYYY-MM-DD-HH:MM:SS",
+                   "loggerName": "hvac", "source": "",
+                   "type": 0|1|2, "repeatCount": 1,
+                   "message": "..."       (type=0 Text)
+                   "numericValue": 42.5   (type=1 Numeric)
+                   "enumValue": 3         (type=2 Enum) }, "2": {...} }
+    -->
+    <route id="plc-log-consumer" autoStartup="{{plc.log.route.autoStartup}}">
+        <from uri="{{plc.log.consume.uri}}"/>
+        <doTry>
+            <convertBodyTo type="java.lang.String"/>
+            <unmarshal>
+                <json library="Jackson"/>
+            </unmarshal>
+            <to uri="direct:plc-log-ingest"/>
+            <doCatch>
+                <exception>java.lang.Exception</exception>
+                <log message="Discarding PLC log payload after runtime failure: ${exception.message}" loggingLevel="WARN"/>
+            </doCatch>
+        </doTry>
+    </route>
+
+    <!--
+        PLC log ingestion route.
+        Input: Jackson-decoded Map {"1":{loggerName,logEventDate,type,message|numericValue|enumValue,...},...}
+
+        Routing by source field:
+          source non-empty → PARAMETER_LOG via store-device-request-inbound
+            parameterId   = loggerName.source
+            numericValue  = numericValue (type=1) | null
+            symbolicValue = message (type=0) | enumValue as string (type=2) | null
+          source empty    → DEVICE_LOG
+            deviceId      = loggerName
+            payload       = full JSON entry
+
+        Steps for source entries:
+          1. Partition batch into withSource / withoutSource lists.
+          2. Ensure PlcLoggerDef PARAMETER_DEF row (idempotent).
+          3. Ensure PARAMETER rows per unique parameterId (idempotent).
+          4. Delegate withSource list to store-device-request-inbound → PARAMETER_LOG.
+          5. Write withoutSource list directly to DEVICE_LOG.
+        All steps are non-blocking: on error the exchange is discarded and inboundErrorNotifier
+        is called, but the route continues processing the next message.
+    -->
+    <route id="plc-log-ingest">
+        <from uri="direct:plc-log-ingest"/>
+        <!--
+            Outer try: catches Groovy transform errors (malformed batch).
+            The two inner paths (withSource / withoutSource) are isolated in their
+            own doTry blocks so that a stop() or failure in one does not suppress the other.
+        -->
+        <doTry>
+            <!-- Partition: entries with source → PARAMETER_LOG, entries without → DEVICE_LOG -->
+            <transform>
+                <groovy><![CDATA[
+import java.text.SimpleDateFormat
+import com.fasterxml.jackson.databind.ObjectMapper
+def sdf    = new SimpleDateFormat("'DT#'yyyy-MM-dd-HH:mm:ss")
+def mapper = new ObjectMapper()
+def withSource    = []
+def withoutSource = []
+(body instanceof Map ? body : [:]).values().withIndex().each { entry, i ->
+    def ts = null
+    try { ts = new java.sql.Timestamp(sdf.parse(entry.logEventDate ?: '').time) } catch(ignored) {}
+    def loggerName = entry.loggerName ?: 'plc-log-unknown'
+    def source     = entry.source ?: ''
+    def type       = entry.type as Integer
+    if (source) {
+        withSource << [
+            parameterId  : "${loggerName}.${source}",
+            observedDate : ts,
+            numericValue : (type == 1) ? entry.numericValue : null,
+            symbolicValue: (type == 2) ? String.valueOf(entry.enumValue) : entry.message,
+            purposeEnumId: 'DrpLogging'
+        ]
+    } else {
+        withoutSource << [
+            deviceLogId : java.util.UUID.randomUUID().toString(),
+            deviceId    : loggerName,
+            payload     : mapper.writeValueAsString(entry),
+            sequenceNum : i,
+            observedDate: ts
+        ]
+    }
+}
+[withSource: withSource, withoutSource: withoutSource]
+                ]]></groovy>
+            </transform>
+            <setProperty name="plcLogWithSource">
+                <groovy>body.withSource</groovy>
+            </setProperty>
+            <setProperty name="plcLogWithoutSource">
+                <groovy>body.withoutSource</groovy>
+            </setProperty>
+
+            <!-- Path A: source entries → PARAMETER_LOG via store-device-request-inbound.
+                 Isolated in its own doTry so stop() from store-device-request-inbound
+                 cannot suppress Path B below. -->
+            <doTry>
+                <choice>
+                    <when>
+                        <groovy>exchange.properties.plcLogWithSource</groovy>
+                        <doTry>
+                            <to uri="{{plc.log.store.ensure.parameter.def.uri}}"/>
+                            <doCatch>
+                                <exception>java.lang.Exception</exception>
+                                <log message="Could not ensure PlcLoggerDef ParameterDef: ${exception.message}" loggingLevel="WARN"/>
+                            </doCatch>
+                        </doTry>
+                        <setBody>
+                            <groovy>exchange.properties.plcLogWithSource.collect { [parameterId: it.parameterId] }.unique { it.parameterId }</groovy>
+                        </setBody>
+                        <doTry>
+                            <toD uri="{{plc.log.store.ensure.parameter.uri}}"/>
+                            <doCatch>
+                                <exception>java.lang.Exception</exception>
+                                <log message="Discarding MQTT-PLC-LOG (source) after PARAMETER upsert failure: ${exception.message}" loggingLevel="WARN"/>
+                                <to uri="bean:inboundErrorNotifier?method=recordError"/>
+                            </doCatch>
+                        </doTry>
+                        <setBody>
+                            <groovy>exchange.properties.plcLogWithSource</groovy>
+                        </setBody>
+                        <setProperty name="protocolLabel"><constant>MQTT-PLC-LOG</constant></setProperty>
+                        <setProperty name="storeLogUri"><simple>{{mqtt.read.store.log.uri}}</simple></setProperty>
+                        <setProperty name="storeParameterUri"><simple>{{mqtt.read.store.parameter.uri}}</simple></setProperty>
+                        <setProperty name="afterStoreEnabled"><simple>{{mqtt.read.afterStore.enabled}}</simple></setProperty>
+                        <setProperty name="afterStoreUri"><simple>{{mqtt.read.afterStore.uri}}</simple></setProperty>
+                        <to uri="direct:store-device-request-inbound"/>
+                    </when>
+                </choice>
+                <doCatch>
+                    <exception>java.lang.Exception</exception>
+                    <log message="Discarding MQTT-PLC-LOG (source) after unexpected failure: ${exception.message}" loggingLevel="WARN"/>
+                    <to uri="bean:inboundErrorNotifier?method=recordError"/>
+                </doCatch>
+            </doTry>
+
+            <!-- Path B: no-source entries → DEVICE_LOG. Always runs independently of Path A. -->
+            <doTry>
+                <choice>
+                    <when>
+                        <groovy>exchange.properties.plcLogWithoutSource</groovy>
+                        <setBody>
+                            <groovy>exchange.properties.plcLogWithoutSource</groovy>
+                        </setBody>
+                        <toD uri="{{plc.log.store.device.log.uri}}"/>
+                    </when>
+                </choice>
+                <doCatch>
+                    <exception>java.lang.Exception</exception>
+                    <log message="Discarding MQTT-PLC-LOG (no source) after DEVICE_LOG write failure: ${exception.message}" loggingLevel="WARN"/>
+                    <to uri="bean:inboundErrorNotifier?method=recordError"/>
+                </doCatch>
+            </doTry>
+
+            <doCatch>
+                <exception>java.lang.Exception</exception>
+                <log message="Discarding MQTT-PLC-LOG inbound payload after transform failure: ${exception.message}" loggingLevel="WARN"/>
+                <to uri="bean:inboundErrorNotifier?method=recordError"/>
+            </doCatch>
+        </doTry>
+    </route>
 </routes>

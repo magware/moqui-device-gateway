@@ -1,0 +1,24 @@
+services:
+  moqui-log-database:
+    image: postgres:18.1
+    container_name: moqui-log-database
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:5434:5432
+    volumes:
+      - ./db/postgres:/var/lib/postgresql
+    environment:
+      - POSTGRES_DB=moqui
+      - POSTGRES_USER=moqui
+      - POSTGRES_PASSWORD=moqui
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U moqui -d moqui"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - moqui-gateway-net
+
+networks:
+  moqui-gateway-net:
+    name: moqui-gateway-net
