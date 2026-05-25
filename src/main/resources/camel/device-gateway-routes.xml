@@ -223,38 +223,63 @@ along with this software (see the LICENSE.md file). If not, see
 
     <!--
         Canonical DeviceConfig export route.
-        Triggered by a request with deviceRuleSetId + deviceId and delegates the DB fetch
-        to the configured endpoint. The output remains the Codesys txt recipe format.
+        Groups DeviceRule rows by PRIORITY within a DeviceRuleSet and writes one
+        Codesys txtrecipe file per priority group.
+        Filename: {ruleSetName}_p{priority:02d}.txt
+        All DeviceRule rows with the same PRIORITY land in the same file; different
+        priorities produce separate files so Codesys loads them as distinct recipe steps.
     -->
     <route id="run-device-config-export">
         <from uri="direct:run-device-config-export"/>
-        <setBody>
-            <groovy>body instanceof java.util.Map &amp;&amp; !body.containsKey('deviceId') ? new java.util.LinkedHashMap(body).tap { put('deviceId', null) } : body</groovy>
-        </setBody>
-        <!-- Persist export IDs before the SQL query replaces the body -->
-        <setProperty name="exportDeviceId">
-            <groovy>body?.deviceId ?: 'device'</groovy>
-        </setProperty>
-        <setProperty name="exportDeviceRuleId">
-            <groovy>body?.deviceRuleId ?: 'rule'</groovy>
-        </setProperty>
         <toD uri="{{device.config.export.fetch.uri}}"/>
         <transform>
             <groovy>body instanceof Map &amp;&amp; body.containsKey('rowList') ? body.rowList : body</groovy>
         </transform>
-        <setProperty name="recipeRowCount">
-            <simple>${body.size()}</simple>
-        </setProperty>
+        <!-- Build one entry per priority group: {filename, content, priority, rowCount} -->
         <transform>
-            <groovy>body.collect { "${it['parameterName']}:=${it['parameterValue']}" }.join('\n')</groovy>
+            <groovy><![CDATA[
+def rows = body instanceof List ? body : [body]
+def ruleSetName = rows ? (rows[0]?.ruleSetName ?: 'recipe') : 'recipe'
+rows.groupBy { it['priority'] ?: 0 }
+    .sort { a, b -> (a.key as int) <=> (b.key as int) }
+    .collect { priority, group ->
+        [
+            filename : "${ruleSetName}_p${String.format('%02d', priority as int)}.txt",
+            content  : group.collect { "${it['parameterName']}:=${it['parameterValue']}" }.join('\n'),
+            priority : priority,
+            rowCount : group.size()
+        ]
+    }
+            ]]></groovy>
         </transform>
-        <setHeader name="CamelFileName">
-            <groovy>"${exchange.properties.exportDeviceId}_${exchange.properties.exportDeviceRuleId}.txt"</groovy>
-        </setHeader>
-        <to uri="direct:transfer-file"/>
+        <setProperty name="exportFileList">
+            <groovy>body</groovy>
+        </setProperty>
+        <!-- Write one file per priority group -->
+        <split>
+            <simple>${body}</simple>
+            <setHeader name="CamelFileName">
+                <groovy>body.filename</groovy>
+            </setHeader>
+            <transform>
+                <groovy>body.content</groovy>
+            </transform>
+            <to uri="direct:transfer-file"/>
+        </split>
+        <!-- Build response from the saved file list -->
         <setBody>
-            <simple>{"status":"completed","routeId":"${exchange.fromRouteId}","rowCount":${exchangeProperty.recipeRowCount}}</simple>
+            <groovy>exchange.properties.exportFileList</groovy>
         </setBody>
+        <transform>
+            <groovy><![CDATA[
+import com.fasterxml.jackson.databind.ObjectMapper
+new ObjectMapper().writeValueAsString([
+    status  : 'completed',
+    routeId : exchange.fromRouteId,
+    files   : body.collect { [filename: it.filename, priority: it.priority, rowCount: it.rowCount] }
+])
+            ]]></groovy>
+        </transform>
         <unmarshal>
             <json library="Jackson"/>
         </unmarshal>
