@@ -80,13 +80,14 @@ gateway will look up in the shared DB to obtain fieldbus configuration (broker, 
 
 ### Moqui services
 
-Three services are provided in `DeviceGatewayServices.xml`:
+Four services are provided in `DeviceGatewayServices.xml`:
 
 | Service | Description |
 |---|---|
 | `run#GatewayDeviceRequest` | Implements `run#DeviceRequestInternal`; dispatches MQTT write/subscribe/unsubscribe and OPC UA write/subscribe/unsubscribe to the gateway via REST |
-| `export#DeviceConfig` | Triggers a recipe export via `POST /api/device-config/export`; accepts `deviceRuleSetId` (required), `deviceId` (optional), and `requestName` (the Moqui-side DeviceRequest holding the gateway base URL) |
+| `export#DeviceConfig` | Triggers a recipe export via `POST /api/device-config/export`; accepts `deviceRuleSetId` (required), `deviceId` and `deviceRuleId` (optional filters), and `requestName` (the Moqui-side DeviceRequest holding the gateway base URL); returns one file per priority group |
 | `transfer#DeviceContent` | Reads a `DeviceContent` file via the Moqui resource system and streams it Base64-encoded to `POST /api/device-content/transfer/{gwRequestName}` for SFTP or local file transfer |
+| `receive#GatewayNotification` | Receives inbound error / recovery callbacks from the gateway (`gateway.inbound.error.notification.uri`); logs warnings on `inboundError` and info on `inboundRecovered` |
 
 ### Request type dispatch
 
@@ -330,12 +331,13 @@ Each `DEVICE_REQUEST_ITEM.QUERY` holds the target node id.
 
 ---
 
-### 6. Device config export — recipe file → PLC
+### 6. Device config export — recipe files → PLC
 
-Fetches parameter values bound to a `DEVICE_RULE_SET`, formats them as a Codesys-compatible
-`.txt` recipe file, and transfers the file to a local path or remote SFTP endpoint.
+Fetches parameter values bound to a `DEVICE_RULE_SET`, groups them by `DEVICE_RULE.PRIORITY`,
+and writes one Codesys-compatible `.txt` recipe file per priority group. Each file is transferred
+to a local path or remote SFTP endpoint.
 
-**Trigger via REST** (multi-device — all devices in the rule set):
+**Trigger via REST** (all devices in the rule set, all priorities):
 
 ```bash
 curl -X POST http://localhost:8081/api/device-config/export \
@@ -344,7 +346,7 @@ curl -X POST http://localhost:8081/api/device-config/export \
      -d '{"deviceRuleSetId":"VPL_RULESET_1"}'
 ```
 
-**Trigger via REST** (single-device — limit to one `deviceId`):
+**Trigger via REST** (single device — limit to one `deviceId`):
 
 ```bash
 curl -X POST http://localhost:8081/api/device-config/export \
@@ -353,8 +355,32 @@ curl -X POST http://localhost:8081/api/device-config/export \
      -d '{"deviceRuleSetId":"VPL_RULESET_1","deviceId":"VIRTUAL_PLC_001"}'
 ```
 
-`deviceRuleSetId` is required (missing it returns HTTP 400). `deviceId` is optional: when
-omitted, all devices referenced by the rule set are exported in a single multi-device recipe.
+**Trigger via REST** (single rule — limit to one `deviceRuleId`):
+
+```bash
+curl -X POST http://localhost:8081/api/device-config/export \
+     -H 'X-API-Key: change-me-in-production' \
+     -H 'Content-Type: application/json' \
+     -d '{"deviceRuleSetId":"VPL_RULESET_1","deviceRuleId":"RULE_001"}'
+```
+
+`deviceRuleSetId` is required (missing it returns HTTP 400). `deviceId` and `deviceRuleId`
+are both optional filters; when omitted, all devices and rules in the rule set are exported.
+
+**File grouping by priority**
+
+`DEVICE_RULE.PRIORITY` drives the file split: all rules sharing the same priority value land
+in one file; rules with a different priority produce a separate file.
+
+Filename format: `{ruleSetName}_p{priority:02d}.txt`
+
+Example for a rule set named `HvacZone1` with three priority groups:
+
+| Priority | Devices included | Filename |
+|---|---|---|
+| `1` | ColdGlycolPump, ColdGlycolValve | `HvacZone1_p01.txt` |
+| `2` | HotWaterPump, HotWaterValve | `HvacZone1_p02.txt` |
+| `10` | AHUFAN, AirFlow | `HvacZone1_p10.txt` |
 
 **Parameter naming convention** (priority order):
 
@@ -362,20 +388,19 @@ omitted, all devices referenced by the rule set are exported in a single multi-d
 |---|---|---|
 | 1 | `DEVICE_REQUEST_ITEM.REQUEST_ITEM_NAME` (when not blank) | `RecipeReference` |
 | 2 | `PARAMETER.PARAMETER_ALIAS` (when not blank) | `AliasedReference` |
-| 3 | `PHYSICAL_DEVICE.DEVICE_NAME.PARAMETER_DEF.PARAMETER_NAME` (always available) | `virtual_plc.RecipeReference` |
+| 3 | `PHYSICAL_DEVICE.DEVICE_NAME` + `PARAMETER_DEF.PARAMETER_NAME` (always available) | `virtual_plc.RecipeReference` |
 
 The `DeviceName.ParameterName` fallback makes the recipe safe for multi-device exports where
 different `DEVICE_RULE` entries have different `deviceId` values.
 
-**Output format** (`recipe.txt`):
+**Output format** (one line per parameter, `<name>:=<value>`):
 
 ```
 virtual_plc.RecipeReference:=250.0
 virtual_plc.RecipeState:=AUTO
 ```
 
-One line per parameter: `<name>:=<value>`. Numeric values are cast to VARCHAR; enum ID
-is used next if present; symbolic value is the final fallback.
+Numeric values are cast to VARCHAR; enum ID is used next if present; symbolic value is the final fallback.
 
 **Transfer configuration**:
 
@@ -385,10 +410,17 @@ file.transfer.uri.2.enabled=true
 file.transfer.uri.2=sftp:admin@plc2.example.com:22/recipe
 ```
 
-**Example response**:
+**Example response** (two priority groups → two files):
 
 ```json
-{"status": "completed", "routeId": "run-device-config-export", "rowCount": 2}
+{
+  "status": "completed",
+  "routeId": "run-device-config-export",
+  "files": [
+    {"filename": "HvacZone1_p01.txt", "priority": 1, "rowCount": 4},
+    {"filename": "HvacZone1_p02.txt", "priority": 2, "rowCount": 6}
+  ]
+}
 ```
 
 ---
@@ -591,6 +623,7 @@ When a subscription route is registered for a single item, the raw value (unwrap
 | `transfer-device-content` | `direct:transfer-device-content` | Streams device content (G-Code, firmware, CNC programs) to a dynamic URI set by the caller |
 | `plc-log-consumer` | `plc.log.consume.uri` (broker or SEDA) | PLC diagnostic log consumer; auto-start controlled by `plc.log.route.autoStartup` |
 | `plc-log-ingest` | `direct:plc-log-ingest` | Transforms CODESYS LoggerFacade batch format; routes entries with `source` to `PARAMETER_LOG` (Path A) and entries without `source` to `DEVICE_LOG` (Path B); the two paths are isolated — a failure in one does not suppress the other |
+| `plc-log-subscribe-device-request` | `direct:plc-log-subscribe-device-request` | Dynamic MQTT subscription for PLC log data (purpose `DrpLogging`); registers a per-request consumer that forwards batches to `direct:plc-log-ingest` instead of the standard MQTT ingest path |
 | `device-request-consumer-{name}-{n}` | Dynamic (MQTT topic or OPC UA node) | Per-item subscription routes registered at runtime |
 
 ---
@@ -639,6 +672,16 @@ cleanup continues past individual failures.
 
 ### Database
 
+Two named datasources are used:
+
+- **Default datasource** — reads `DEVICE_REQUEST`, `PARAMETER`, `DEVICE_CONFIG` (fieldbus config and current state).
+- **`log` datasource** — writes `PARAMETER_LOG` and `DEVICE_LOG` (time-series ingestion path).
+
+Splitting the write-heavy log path onto a dedicated pool prevents log bursts from starving
+the config read pool and vice versa.
+
+#### Default datasource
+
 | Property | Default | Description |
 |---|---|---|
 | `quarkus.datasource.db-kind` | `postgresql` | JDBC driver kind |
@@ -648,6 +691,18 @@ cleanup continues past individual failures.
 | `quarkus.datasource.jdbc.min-size` | `2` | Minimum connection pool size |
 | `quarkus.datasource.jdbc.max-size` | `10` | Maximum connection pool size |
 | `quarkus.datasource.jdbc.acquisition-timeout` | `2S` | Max wait for a free connection; keep low to fail fast during DB outages |
+
+#### Log datasource
+
+| Property | Default | Description |
+|---|---|---|
+| `quarkus.datasource.log.db-kind` | `postgresql` | JDBC driver kind |
+| `quarkus.datasource.log.jdbc.url` | `jdbc:postgresql://localhost:5432/moqui` | JDBC URL (same DB by default; override to a replica if needed) |
+| `quarkus.datasource.log.username` | `moqui` | DB username |
+| `quarkus.datasource.log.password` | `moqui` | DB password |
+| `quarkus.datasource.log.jdbc.min-size` | `1` | Minimum connection pool size |
+| `quarkus.datasource.log.jdbc.max-size` | `5` | Maximum connection pool size |
+| `quarkus.datasource.log.jdbc.acquisition-timeout` | `2S` | Max wait for a free connection |
 
 ### Gateway SQL queries
 
@@ -718,12 +773,14 @@ The `%integration` and `%local` profiles set `plc.log.route.autoStartup=true` an
 
 | Property | Default | Description |
 |---|---|---|
-| `device.config.export.sql.query` | SELECT recipe rows by `deviceRuleSetId` + `deviceId` | SQL to fetch parameter rows for the recipe |
+| `device.config.export.sql.query` | SELECT recipe rows by `deviceRuleSetId`, `deviceId`, `deviceRuleId`, grouped and ordered by `PRIORITY` | SQL to fetch parameter rows for the export |
 | `device.config.export.fetch.uri` | SQL endpoint built from query above | Fetch endpoint |
-| `device.config.export.filename` | `recipe.txt` | `CamelFileName` header value |
 | `file.transfer.uri` | `seda:export-device-config-out` | Primary file / SFTP transfer endpoint |
 | `file.transfer.uri.2.enabled` | `false` | Enable secondary (redundant) transfer |
 | `file.transfer.uri.2` | `seda:export-device-config-out-2` | Secondary transfer endpoint |
+
+Filenames are derived at runtime as `{ruleSetName}_p{priority:02d}.txt` — there is no static
+filename property. The `CamelFileName` header is set per file inside the export route.
 
 ### Subscription persistence
 
