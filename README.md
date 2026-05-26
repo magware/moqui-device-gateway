@@ -856,6 +856,83 @@ Reads always continue regardless of DB failures — no inbound flow is ever bloc
 
 ---
 
+## Configuring gateway callbacks toward Moqui
+
+The gateway sends two types of callbacks to Moqui when inbound persistence fails or recovers:
+`inboundError` (after the error threshold is exceeded) and `inboundRecovered` (on first
+successful write after an error window). Both are handled by the `receive#GatewayNotification`
+service defined in `DeviceGatewayServices.xml` (component `moqui-device`).
+
+### Step 1 — verify the Moqui service is deployed
+
+`DeviceGatewayServices.xml` must be present in the `moqui-device` component and loaded by Moqui.
+The service is declared as `authenticate="false"` so Moqui does not require a session or API
+credentials for gateway-originated calls.
+
+### Step 2 — set `gateway.inbound.error.notification.uri`
+
+The property accepts any Camel producer endpoint. For HTTP delivery to Moqui:
+
+```properties
+gateway.inbound.error.notification.enabled=true
+gateway.inbound.error.notification.threshold.seconds=60
+gateway.inbound.error.notification.uri=http://moqui-server:8080/rest/s1/moqui/device/DeviceGatewayServices/receive/GatewayNotification
+```
+
+The Moqui REST path follows the standard convention:
+`/rest/s1/{service-namespace}/{verb}/{noun}`
+→ `moqui.device.DeviceGatewayServices.receive#GatewayNotification`
+→ `/rest/s1/moqui/device/DeviceGatewayServices/receive/GatewayNotification`
+
+Camel performs an HTTP `POST` with a JSON body. The gateway sets `Content-Type: application/json`
+on the exchange before forwarding to the configured URI.
+
+### Step 3 — optional: restrict the Moqui endpoint by IP
+
+Because the service has `authenticate="false"`, consider restricting access to the endpoint
+at the reverse-proxy or firewall level to the gateway host IP. This prevents unauthenticated
+callers from submitting spurious notifications.
+
+### Payload reference
+
+Both notification types share the same JSON structure; unused fields are omitted:
+
+```json
+{
+  "eventType": "inboundError",
+  "routeId": "device-request-consumer-VPL_OPCUA_READ_REQ-0",
+  "requestName": "VPL_OPCUA_READ_REQ",
+  "protocol": "OPC UA",
+  "errorMessage": "Connection refused",
+  "firstErrorTime": "2026-05-02T10:00:00Z",
+  "errorDurationSeconds": 63
+}
+```
+
+```json
+{
+  "eventType": "inboundRecovered",
+  "routeId": "device-request-consumer-VPL_OPCUA_READ_REQ-0",
+  "firstErrorTime": "2026-05-02T10:00:00Z",
+  "errorDurationSeconds": 120
+}
+```
+
+Moqui's `receive#GatewayNotification` logs a `WARN` for `inboundError` and an `INFO` for
+`inboundRecovered`. The service body is the place to add `DeviceAlert` creation or any
+downstream notification logic required by the application.
+
+### Testing scope
+
+`InboundErrorNotifierTest` verifies the gateway-side behaviour only: it captures notifications
+on a local SEDA endpoint and validates the JSON payload format. It does **not** simulate the
+HTTP call to Moqui. End-to-end testing of the full callback flow requires either:
+
+- A **WireMock** HTTP stub that accepts the POST and validates the payload (recommended for CI).
+- A live Moqui instance with `moqui-device` deployed.
+
+---
+
 ## Runtime error policy
 
 | Area | Runtime error | Data effect | Route/process effect |
@@ -989,7 +1066,7 @@ file.transfer.uri.2=sftp:admin@plc2.example.com:22/recipe
 ```properties
 gateway.inbound.error.notification.enabled=true
 gateway.inbound.error.notification.threshold.seconds=60
-gateway.inbound.error.notification.uri=http://moqui-server:8080/rest/s1/org/moqui/device/notify/inboundError
+gateway.inbound.error.notification.uri=http://moqui-server:8080/rest/s1/moqui/device/DeviceGatewayServices/receive/GatewayNotification
 ```
 
 ---
@@ -1055,14 +1132,15 @@ The `%local` profile connects to a local PostgreSQL and a remote Artemis broker 
 
 ## Standalone deployment (Docker)
 
-The gateway ships with two Docker Compose files under `docker/`:
+The gateway ships with Docker Compose files split by purpose:
 
-| File | Description |
-|---|---|
-| `docker/db-compose.yml` | PostgreSQL 18 with `init.sql` schema; exposes port `5434` on the host |
-| `docker/gateway-compose.yml` | Gateway container; reaches the DB by container name on the shared `moqui-gateway-net` network |
+| File | Purpose | Description |
+|---|---|---|
+| `src/test/docker/db-compose.yml` | **Test / development only** | Starts a standalone PostgreSQL 18 on host port `5434`; never used in production |
+| `docker/gateway-compose.yml` | Production / standalone deployment | Gateway container; reaches the DB by container name on `moqui-gateway-net` |
 
-Both compose files join the Docker network `moqui-gateway-net` (created by `db-compose.yml`).
+`src/test/docker/db-compose.yml` creates the Docker network `moqui-gateway-net` that `gateway-compose.yml` expects as external.
+The matching schema initialisation script (`src/test/resources/db/init.sql`) is a **test artifact** — it creates a minimal schema for standalone testing only. In production the Moqui entity engine creates all required tables on its own startup.
 
 **Prerequisites on the target server:** Java 21+, Maven 3.9+, Docker.
 
@@ -1081,14 +1159,16 @@ mvn package -DskipTests
 # 2. Build the Docker image
 docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
 
-# 3. Start the DB (also creates moqui-gateway-net)
-docker compose -f docker/db-compose.yml up -d
+# 3. Start the test DB (also creates moqui-gateway-net)
+#    db-compose.yml is a test/dev artifact — never used in production
+docker compose -f src/test/docker/db-compose.yml up -d
 
 # 4. Apply the schema (standalone testing only — run once after first DB start)
+#    init.sql is a test artifact; in production Moqui creates all tables automatically
 #    From the server:
-docker exec -i moqui-log-database psql -U moqui -d moqui < src/main/resources/db/init.sql
+docker exec -i moqui-log-database psql -U moqui -d moqui < src/test/resources/db/init.sql
 #    Or from a Windows machine via PowerShell:
-#    Get-Content "...\src\main\resources\db\init.sql" | ssh user@host "docker exec -i moqui-log-database psql -U moqui -d moqui"
+#    Get-Content "...\src\test\resources\db\init.sql" | ssh user@host "docker exec -i moqui-log-database psql -U moqui -d moqui"
 
 # 5. Verify schema
 docker exec moqui-log-database psql -U moqui -d moqui -c "\dt"
@@ -1149,7 +1229,7 @@ MQTT endpoints are replaced by SEDA; OPC UA endpoints are disabled.
 
 ### Integration tests
 
-Require live PostgreSQL on `localhost:5432` and Artemis MQTT on `localhost:1883`.
+Require live PostgreSQL on `localhost:5432` and (for MQTT tests) Artemis MQTT on `localhost:1883`.
 Bring up the baseline with Docker (see next section), then run explicitly:
 
 ```bash
@@ -1164,6 +1244,68 @@ mvn test -Dquarkus.profile=integration -Dtest=OpcUaGatewayIntegrationTest
 
 ```bash
 mvn test -Dquarkus.profile=integration -Dtest=MqttInboundIntegrationTest
+```
+
+#### PLC diagnostic log ingest (`PlcLogIngestIntegrationTest`)
+
+Requires **PostgreSQL** and **Artemis MQTT** on `localhost:1883`.
+
+Publishes CODESYS LoggerFacade batch messages to a dedicated test topic and asserts that
+`PARAMETER_LOG` and `DEVICE_LOG` rows are written correctly. Each test run uses a unique
+`loggerName` prefix and cleans up its own rows in `@AfterEach`.
+
+| Test | What it verifies |
+|---|---|
+| `tc01_numericSourceEntryInsertsParameterLogWithNumericValue` | `type=1` entry → `PARAMETER_LOG.NUMERIC_VALUE` |
+| `tc02_textSourceEntryInsertsParameterLogWithSymbolicValue` | `type=0` entry with `source` → `PARAMETER_LOG.SYMBOLIC_VALUE` |
+| `tc03_noSourceEntryInsertsDeviceLog` | empty `source` → `DEVICE_LOG.PAYLOAD` contains original message |
+| `tc04_mixedBatchRoutesSourceEntriesToParameterLogAndNoSourceToDeviceLog` | both paths fire independently in a single batch |
+| `tc05_dtHashTimestampIsParsedIntoObservedDate` | `DT#YYYY-MM-DD-HH:MM:SS` → `PARAMETER_LOG.OBSERVED_DATE` |
+| `tc06_malformedBatchIsDiscardedWithoutStoppingConsumerRoute` | malformed JSON dropped; subsequent valid message still processed |
+
+```bash
+mvn test -Dquarkus.profile=integration -Dtest=PlcLogIngestIntegrationTest
+```
+
+#### Inbound error notifier (`InboundErrorNotifierTest`)
+
+Requires **PostgreSQL** only (no MQTT broker). All Camel routes that need a broker endpoint
+are replaced by SEDA URIs via `InboundErrorNotifierTestProfile`.
+Notifications are captured from a local `seda:test-error-notifications` endpoint instead of
+being sent to Moqui.
+`gateway.inbound.error.notification.threshold.seconds=0` so the very first `recordError()`
+call fires a notification without waiting.
+
+| Test | What it verifies |
+|---|---|
+| `errorNotificationSentOnFirstRecordError` | `recordError()` sends `inboundError` notification with `eventType`, `routeId`, `protocol`, `errorMessage`, `firstErrorTime`, `errorDurationSeconds` |
+| `recoveryNotificationSentAfterClearError` | `clearError()` after a prior error sends `inboundRecovered` notification |
+| `noRepeatNotificationForSameRoute` | second `recordError()` for the same route does not send a duplicate |
+| `clearErrorOnCleanRouteIsNoop` | `clearError()` on a route with no prior error is silent (no notification, no exception) |
+| `errorStatesAreTrackedPerRoute` | two different route ids each receive their own independent notification |
+
+```bash
+mvn test -Dquarkus.profile=integration -Dtest=InboundErrorNotifierTest
+```
+
+#### Subscription persistence (`SubscriptionPersistenceTest`)
+
+Requires **PostgreSQL** only (no MQTT broker).
+The registry file is written to `target/test-subscriptions/subscriptions.json`
+(overridden via `SubscriptionPersistenceTestProfile`) and cleaned before each test.
+
+| Test | What it verifies |
+|---|---|
+| `saveAddsSubscriptionToInMemoryRegistry` | `save()` adds entries visible via `loadAll()` |
+| `removeDeletesSubscriptionFromInMemoryRegistry` | `remove()` removes a specific entry without affecting others |
+| `loadAllReturnsEmptyListWhenNoSubscriptionsRegistered` | empty registry returns empty list |
+| `saveWritesSubscriptionToJsonFile` | `save()` writes the JSON file to disk |
+| `removeUpdatesJsonFileOnDisk` | `remove()` updates the file; removed name absent, kept name present |
+| `persistedFileSurvivesSimulatedRestart` | JSON file read directly via `ObjectMapper` (mirrors `@PostConstruct`) returns all saved entries |
+| `saveSameNameTwiceProducesNoDuplicate` | duplicate `save()` call produces exactly one entry in memory and on disk |
+
+```bash
+mvn test -Dquarkus.profile=integration -Dtest=SubscriptionPersistenceTest
 ```
 
 ### Manual MQTT smoke tests
@@ -1339,8 +1481,9 @@ The `gateway-subscriptions` readiness check reports:
 
 ```bash
 # Option A — standalone DB only (no full Moqui stack required)
+#   db-compose.yml is a test/dev artifact; data is stored under target/test-db/
 cd moqui-device-gateway
-docker compose -f docker/db-compose.yml up -d
+docker compose -f src/test/docker/db-compose.yml up -d
 mvn quarkus:dev -Dquarkus.profile=integration \
     -Dquarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5434/moqui
 

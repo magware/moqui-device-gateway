@@ -69,7 +69,7 @@ class GatewaySeededRouteIntegrationTest {
     void cleanup() throws Exception {
         camelContext.getPropertiesComponent().setOverrideProperties(new Properties());
         while (consumer.receiveBody("seda:testConfigOut", 10L) != null) {}
-        Files.deleteIfExists(Path.of("target/test-recipes/recipe.txt"));
+        Files.deleteIfExists(Path.of("target/test-recipes/VirtualPlcRuleSet_p01.txt"));
         removeDynamicRoutes(seed("VPL_MQTT_SUB_REQ"));
         deleteSeedData();
     }
@@ -156,15 +156,31 @@ class GatewaySeededRouteIntegrationTest {
 
         assertEquals("completed", result.get("status"));
         assertEquals("run-device-config-export", result.get("routeId"));
-        assertEquals(2, ((Number) result.get("rowCount")).intValue());
 
-        Path recipePath = Path.of("target/test-recipes/recipe.txt");
+        // Response now carries a files[] array (one entry per priority group)
+        @SuppressWarnings("unchecked")
+        java.util.List<Map<String, Object>> files = (java.util.List<Map<String, Object>>) result.get("files");
+        assertNotNull(files, "Response must contain 'files' array");
+        assertEquals(1, files.size(), "Seed data has one priority group (priority=1)");
+
+        Map<String, Object> fileEntry = files.get(0);
+        assertEquals("VirtualPlcRuleSet_p01.txt", fileEntry.get("filename"),
+            "Filename must follow {ruleSetName}_p{priority:02d}.txt pattern");
+        assertEquals(2, ((Number) fileEntry.get("rowCount")).intValue(),
+            "Priority group must contain 2 parameters (RecipeReference + RecipeState)");
+        assertEquals(1, ((Number) fileEntry.get("priority")).intValue());
+
+        // Verify the actual file was written with correct content
+        Path recipePath = Path.of("target/test-recipes/VirtualPlcRuleSet_p01.txt");
         Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> Files.exists(recipePath));
         String recipe = Files.readString(recipePath, StandardCharsets.UTF_8);
-        assertNotNull(recipe);
         // format: DeviceName.ParameterName:=value (multi-device-safe naming convention)
-        assertTrue(recipe.contains("virtual_plc.RecipeReference:=250.0"));
-        assertTrue(recipe.contains("virtual_plc.RecipeState:=AUTO"));
+        assertTrue(recipe.contains("virtual_plc.RecipeReference:=250.0"),
+            "Recipe must contain RecipeReference parameter");
+        assertTrue(recipe.contains("virtual_plc.RecipeState:=AUTO"),
+            "Recipe must contain RecipeState parameter");
+
+        Files.deleteIfExists(recipePath);
     }
 
     private void runSeedSql() throws Exception {
