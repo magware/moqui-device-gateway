@@ -89,7 +89,7 @@ class OpcUaGatewayIntegrationTest {
         GatewayRequestService.RequestContext subscribeCtx = gatewayRequestService.loadRequestContext(seed("VPL_OPCUA_READ_REQ"));
         @SuppressWarnings("unchecked")
         Map<String, Object> result = producer.requestBody(
-            "direct:opcua-subscribe-device-request",
+            "direct:dispatch-device-request",
             subscribeCtx,
             Map.class
         );
@@ -124,7 +124,7 @@ class OpcUaGatewayIntegrationTest {
         GatewayRequestService.RequestContext writeCtx = gatewayRequestService.loadRequestContext(seed("VPL_OPCUA_WRITE_REQ"));
         @SuppressWarnings("unchecked")
         Map<String, Object> result = producer.requestBody(
-            "direct:opcua-write-device-request",
+            "direct:dispatch-device-request",
             writeCtx,
             Map.class
         );

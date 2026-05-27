@@ -11,7 +11,7 @@ import java.util.Map;
  * Redirects notifications to a local SEDA endpoint so the test can consume them.
  * MQTT routes are disabled — no broker is required.
  *
- * Prerequisite: PostgreSQL on localhost:5432 (same as IntegrationTestProfile).
+ * Prerequisite: PostgreSQL on localhost:5434 (same as IntegrationTestProfile).
  * Run: mvn test -Dquarkus.profile=integration -Dtest=InboundErrorNotifierTest
  */
 public class InboundErrorNotifierTestProfile extends IntegrationTestProfile {

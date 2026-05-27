@@ -13,11 +13,11 @@ import org.junit.jupiter.api.Test;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 
-/**
- * Unit tests for the gateway XML Camel routes.
- *
- * Uses SEDA endpoints (default config) to avoid requiring a live database or broker.
- */
+    /**
+     * Unit tests for the gateway Java DSL Camel routes.
+     *
+     * Uses SEDA endpoints (default config) to avoid requiring a live database or broker.
+     */
 @QuarkusTest
 class GatewayRouteTest {
 
@@ -32,20 +32,17 @@ class GatewayRouteTest {
 
     @Test
     void allRoutesAreLoaded() {
+        assertNotNull(camelContext.getRoute("dispatch-device-request"),          "dispatch-device-request not loaded");
         assertNotNull(camelContext.getRoute("mqtt-read-device-request-consumer"),  "mqtt-read-device-request-consumer not loaded");
         assertNotNull(camelContext.getRoute("mqtt-read-device-request"),           "mqtt-read-device-request not loaded");
-        assertNotNull(camelContext.getRoute("mqtt-write-device-request"),          "mqtt-write-device-request not loaded");
-        assertNotNull(camelContext.getRoute("mqtt-subscribe-device-request"),      "mqtt-subscribe-device-request not loaded");
         assertNotNull(camelContext.getRoute("opcua-read-device-request-consumer"), "opcua-read-device-request-consumer not loaded");
         assertNotNull(camelContext.getRoute("opcua-read-device-request"),          "opcua-read-device-request not loaded");
-        assertNotNull(camelContext.getRoute("opcua-write-device-request"),         "opcua-write-device-request not loaded");
-        assertNotNull(camelContext.getRoute("opcua-subscribe-device-request"),     "opcua-subscribe-device-request not loaded");
+        assertNotNull(camelContext.getRoute("store-device-request-inbound"),       "store-device-request-inbound not loaded");
         assertNotNull(camelContext.getRoute("run-device-config-export"),           "run-device-config-export not loaded");
         assertNotNull(camelContext.getRoute("transfer-file"),                      "transfer-file not loaded");
         assertNotNull(camelContext.getRoute("transfer-device-content"),            "transfer-device-content not loaded");
         assertNotNull(camelContext.getRoute("plc-log-consumer"),                   "plc-log-consumer not loaded");
         assertNotNull(camelContext.getRoute("plc-log-ingest"),                     "plc-log-ingest not loaded");
-        assertNotNull(camelContext.getRoute("plc-log-subscribe-device-request"),   "plc-log-subscribe-device-request not loaded");
     }
 
     /**

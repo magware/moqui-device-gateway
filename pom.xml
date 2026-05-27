@@ -104,17 +104,6 @@
             <groupId>org.apache.camel.quarkus</groupId>
             <artifactId>camel-quarkus-bean</artifactId>
         </dependency>
-        <!-- XML IO DSL: load routes from camel/*.xml in resources -->
-        <dependency>
-            <groupId>org.apache.camel.quarkus</groupId>
-            <artifactId>camel-quarkus-xml-io-dsl</artifactId>
-        </dependency>
-        <!-- Groovy language support for inline transforms in XML routes -->
-        <dependency>
-            <groupId>org.apache.camel.quarkus</groupId>
-            <artifactId>camel-quarkus-groovy</artifactId>
-        </dependency>
-
         <!-- PostgreSQL / YugabyteDB JDBC (YB is PG-wire compatible) -->
         <dependency>
             <groupId>io.quarkus</groupId>

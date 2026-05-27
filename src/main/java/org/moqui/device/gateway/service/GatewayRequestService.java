@@ -5,8 +5,11 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -80,6 +83,9 @@ public class GatewayRequestService {
     @ConfigProperty(name = "opcua.write.afterPublish.uri", defaultValue = "seda:opcua-write-device-request-audit?waitForTaskToComplete=Never")
     String opcuaWriteAfterPublishUri;
 
+    @ConfigProperty(name = "device.config.export.fetch.uri")
+    String deviceConfigExportFetchUri;
+
     void onStart(@Observes StartupEvent ev) {
         for (String requestName : subscriptionPersistence.loadAll()) {
             try {
@@ -96,6 +102,49 @@ public class GatewayRequestService {
                 logger.warnf(e, "Failed to restore subscription for DeviceRequest %s on startup.", requestName);
             }
         }
+    }
+
+    public Map<String, Object> dispatch(RequestContext context) {
+        String requestType = context.requestTypeEnumId();
+        if ("DrtRead".equals(requestType)) return runRead(context);
+        if ("DrtWrite".equals(requestType) || "DrtConfigWrite".equals(requestType)) {
+            return isOpcuaContext(context) ? runOpcUaWrite(context) : runMqttWrite(context);
+        }
+        if (isSubscribeRequestType(requestType)) {
+            if (isPlcLogContext(context)) return subscribePlcLog(context);
+            return isOpcuaContext(context) ? subscribeOpcUa(context) : subscribeMqtt(context);
+        }
+        if ("DrtUnsubscribe".equals(requestType)) return unsubscribe(context);
+        throw new IllegalArgumentException("Unsupported gateway request type " + requestType
+            + " for request " + context.requestName() + ".");
+    }
+
+    public Map<String, Object> runRead(RequestContext context) {
+        assertRequestType(context, "DrtRead");
+        if (!isOpcuaContext(context)) {
+            throw new IllegalArgumentException("DeviceRequest " + context.requestName()
+                + " is a direct read request, but only OPC UA one-shot reads are supported by moqui-device-gateway.");
+        }
+
+        List<Map<String, Object>> normalizedRows = new ArrayList<>();
+        List<String> readUriList = new ArrayList<>();
+        for (String sourceQuery : resolveTopicList(context)) {
+            String readUri = buildOpcUaEndpointUri(context, sourceQuery, false);
+            Object payload = producer.requestBodyAndHeader(readUri, null, MiloConstants.HEADER_AWAIT, true);
+            normalizedRows.addAll(normalizeInboundPayload(context, sourceQuery, payload));
+            readUriList.add(readUri);
+        }
+
+        if (!normalizedRows.isEmpty()) {
+            producer.sendBody("direct:opcua-read-device-request", normalizedRows);
+        }
+
+        return Map.of(
+            "status", "completed",
+            "routeId", "opcua-read-device-request",
+            "rowCount", normalizedRows.size(),
+            "readUriList", readUriList
+        );
     }
 
     public Map<String, Object> runMqttWrite(RequestContext context) {
@@ -339,6 +388,161 @@ public class GatewayRequestService {
         } catch (Exception e) {
             throw new IllegalArgumentException("Unable to resolve DeviceRequest " + requestName + ": " + e.getMessage(), e);
         }
+    }
+
+    public List<Map<String, Object>> coerceInboundRows(Object body) {
+        if (body instanceof List<?> bodyList) {
+            List<Map<String, Object>> rows = new ArrayList<>(bodyList.size());
+            for (Object row : bodyList) rows.add(castMap((Map<?, ?>) row));
+            return rows;
+        }
+        if (body instanceof Map<?, ?> row) return List.of(castMap(row));
+        throw new IllegalArgumentException("Inbound payload must be a Map or List of Map rows.");
+    }
+
+    public List<Map<String, Object>> toParameterUpsertRows(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> upsertRows = new ArrayList<>(rows.size());
+        for (Map<String, Object> row : rows) {
+            Map<String, Object> upsertRow = new LinkedHashMap<>();
+            upsertRow.put("parameterId", row.get("parameterId"));
+            upsertRow.put("numericValue", row.get("numericValue"));
+            upsertRow.put("symbolicValue", row.get("symbolicValue"));
+            upsertRow.put("parameterEnumId", row.get("parameterEnumId"));
+            upsertRows.add(upsertRow);
+        }
+        return upsertRows;
+    }
+
+    public List<Map<String, Object>> toParameterLogRows(List<Map<String, Object>> rows) {
+        List<Map<String, Object>> logRows = new ArrayList<>(rows.size());
+        long baseSequence = System.currentTimeMillis();
+        for (int index = 0; index < rows.size(); index++) {
+            Map<String, Object> row = rows.get(index);
+            Map<String, Object> logRow = new LinkedHashMap<>();
+            logRow.put("parameterLogId", row.getOrDefault("parameterLogId", java.util.UUID.randomUUID().toString()));
+            logRow.put("sequenceNum", row.getOrDefault("sequenceNum", baseSequence + index));
+            logRow.put("parameterId", row.get("parameterId"));
+            logRow.put("observedDate", row.get("observedDate"));
+            logRow.put("numericValue", row.get("numericValue"));
+            logRow.put("symbolicValue", row.get("symbolicValue"));
+            logRow.put("parameterEnumId", row.get("parameterEnumId"));
+            logRows.add(logRow);
+        }
+        return logRows;
+    }
+
+    public PlcLogBatch partitionPlcLogBatch(Object body) {
+        SimpleDateFormat sdf = new SimpleDateFormat("'DT#'yyyy-MM-dd-HH:mm:ss");
+        Map<?, ?> batchMap = body instanceof Map<?, ?> map ? map : Map.of();
+        List<Map<String, Object>> withSource = new ArrayList<>();
+        List<Map<String, Object>> withoutSource = new ArrayList<>();
+
+        int index = 0;
+        for (Object entryObject : batchMap.values()) {
+            if (!(entryObject instanceof Map<?, ?> entryMapRaw)) continue;
+            Map<String, Object> entry = castMap(entryMapRaw);
+            Timestamp observedDate = parsePlcTimestamp(sdf, Objects.toString(entry.get("logEventDate"), ""));
+            String loggerName = Objects.toString(entry.getOrDefault("loggerName", "plc-log-unknown"));
+            String source = Objects.toString(entry.getOrDefault("source", ""));
+            Integer type = entry.get("type") instanceof Number n ? n.intValue() : null;
+
+            if (!source.isBlank()) {
+                Map<String, Object> parameterRow = new LinkedHashMap<>();
+                parameterRow.put("parameterId", loggerName + "." + source);
+                parameterRow.put("observedDate", observedDate);
+                parameterRow.put("numericValue", Integer.valueOf(1).equals(type) ? entry.get("numericValue") : null);
+                parameterRow.put("symbolicValue", Integer.valueOf(2).equals(type)
+                    ? Objects.toString(entry.get("enumValue"), null)
+                    : Objects.toString(entry.get("message"), null));
+                parameterRow.put("purposeEnumId", "DrpLogging");
+                withSource.add(parameterRow);
+            } else {
+                Map<String, Object> deviceRow = new LinkedHashMap<>();
+                deviceRow.put("deviceLogId", java.util.UUID.randomUUID().toString());
+                deviceRow.put("deviceId", loggerName);
+                deviceRow.put("payload", toJson(entry));
+                Object rawSequence = entry.get("sequenceNum");
+                Integer sequenceNum = rawSequence instanceof Number number ? number.intValue() : index + 1;
+                deviceRow.put("sequenceNum", sequenceNum);
+                deviceRow.put("observedDate", observedDate);
+                withoutSource.add(deviceRow);
+            }
+            index++;
+        }
+
+        return new PlcLogBatch(List.copyOf(withSource), List.copyOf(withoutSource));
+    }
+
+    public List<Map<String, Object>> uniqueParameterRefs(List<Map<String, Object>> rows) {
+        LinkedHashMap<String, Map<String, Object>> uniqueRows = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String parameterId = Objects.toString(row.get("parameterId"), null);
+            if (parameterId != null && !parameterId.isBlank()) {
+                uniqueRows.putIfAbsent(parameterId, Map.of("parameterId", parameterId));
+            }
+        }
+        return new ArrayList<>(uniqueRows.values());
+    }
+
+    public List<Map<String, Object>> unwrapSqlRowList(Object body) {
+        if (body instanceof Map<?, ?> map && map.containsKey("rowList")) {
+            Object rowList = map.get("rowList");
+            if (rowList instanceof List<?> rows) return rows.stream().map(row -> castMap((Map<?, ?>) row)).toList();
+        }
+        if (body instanceof List<?> rows) return rows.stream().map(row -> castMap((Map<?, ?>) row)).toList();
+        if (body instanceof Map<?, ?> map) return List.of(castMap(map));
+        return List.of();
+    }
+
+    public List<Map<String, Object>> buildExportFileList(List<Map<String, Object>> rows) {
+        String ruleSetName = rows.isEmpty() ? "recipe" : Objects.toString(rows.get(0).getOrDefault("ruleSetName", "recipe"));
+        Map<Integer, List<Map<String, Object>>> byPriority = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            int priority = row.get("priority") instanceof Number n ? n.intValue() : 0;
+            byPriority.computeIfAbsent(priority, ignored -> new ArrayList<>()).add(row);
+        }
+
+        return byPriority.entrySet().stream()
+            .sorted(Map.Entry.comparingByKey(Comparator.naturalOrder()))
+            .map(entry -> {
+                int priority = entry.getKey();
+                List<Map<String, Object>> group = entry.getValue();
+                String content = group.stream()
+                    .map(row -> Objects.toString(row.get("parameterName"), "")
+                        + ":=" + Objects.toString(row.get("parameterValue"), ""))
+                    .reduce((left, right) -> left + "\n" + right)
+                    .orElse("");
+                Map<String, Object> fileSpec = new LinkedHashMap<>();
+                fileSpec.put("filename", "%s_p%02d.txt".formatted(ruleSetName, priority));
+                fileSpec.put("content", content);
+                fileSpec.put("priority", priority);
+                fileSpec.put("rowCount", group.size());
+                return fileSpec;
+            })
+            .toList();
+    }
+
+    public Map<String, Object> exportDeviceConfig(Map<String, Object> params) {
+        Map<String, Object> queryParams = new LinkedHashMap<>();
+        queryParams.put("deviceRuleSetId", params.get("deviceRuleSetId"));
+        queryParams.put("deviceId", params.get("deviceId"));
+        queryParams.put("deviceRuleId", params.get("deviceRuleId"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> rows = producer.requestBody(deviceConfigExportFetchUri, queryParams, List.class);
+        List<Map<String, Object>> fileList = buildExportFileList(unwrapSqlRowList(rows));
+        for (Map<String, Object> fileSpec : fileList) {
+            producer.sendBodyAndHeader("direct:transfer-file", fileSpec.get("content"), "CamelFileName", fileSpec.get("filename"));
+        }
+        return Map.of(
+            "status", "completed",
+            "routeId", "run-device-config-export",
+            "files", fileList.stream()
+                .map(file -> Map.of(
+                    "filename", file.get("filename"),
+                    "priority", file.get("priority"),
+                    "rowCount", file.get("rowCount")))
+                .toList()
+        );
     }
 
     private Map<String, Object> registerDynamicRoutes(RequestContext context, boolean opcua) {
@@ -629,6 +833,19 @@ public class GatewayRequestService {
         return "DrpLogging".equals(context.purposeEnumId());
     }
 
+    private boolean isSubscribeRequestType(String requestType) {
+        return List.of("DrtSubscribe", "DrtEvent", "DrtStateChange", "DrtCyclic").contains(requestType);
+    }
+
+    private Timestamp parsePlcTimestamp(SimpleDateFormat sdf, String value) {
+        if (value == null || value.isBlank()) return null;
+        try {
+            return new Timestamp(sdf.parse(value).getTime());
+        } catch (ParseException ignored) {
+            return null;
+        }
+    }
+
     /**
      * For PLC log subscriptions the topic comes solely from requestQuery —
      * DeviceRequestItems are not used (the LoggerFacade batch is self-describing).
@@ -722,5 +939,10 @@ public class GatewayRequestService {
         String symbolicValue,
         String parameterEnumId,
         String targetQuery
+    ) {}
+
+    public record PlcLogBatch(
+        List<Map<String, Object>> withSource,
+        List<Map<String, Object>> withoutSource
     ) {}
 }

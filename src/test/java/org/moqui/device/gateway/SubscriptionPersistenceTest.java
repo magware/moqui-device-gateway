@@ -32,7 +32,7 @@ import jakarta.inject.Inject;
  * would reload from disk on gateway restart.
  *
  * Does NOT require an MQTT broker or DB operations.
- * Requires PostgreSQL on localhost:5432 (Quarkus datasource initialization only).
+ * Requires PostgreSQL on localhost:5434 (Quarkus datasource initialization only).
  *
  * Run:
  *   mvn test -Dquarkus.profile=integration -Dtest=SubscriptionPersistenceTest

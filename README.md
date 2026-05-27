@@ -15,8 +15,8 @@ Stack: **Quarkus 3.34.6 · Apache Camel 4.x · Eclipse Milo 1.1.1 · Java 21**
 moqui-device (Moqui JVM)                     moqui-device-gateway (standalone JVM)
 ──────────────────────────────────           ─────────────────────────────────────
 run#DeviceRequest                            REST API (:8081)
-  └─ run#GatewayDeviceRequest  ─── HTTP ───► GatewayRequestService
-       (DeviceGatewayServices.xml)           └─ direct:* Camel routes
+  └─ run#GatewayDeviceRequest  ─── HTTP ───► direct:dispatch-device-request
+       (DeviceGatewayServices.xml)                └─ GatewayRequestService.dispatch()
 run#DeviceConfigExport                       direct:run-device-config-export
 JDBC (shared PostgreSQL) ─────────────────── JDBC (AgroalDataSource)
 ```
@@ -84,26 +84,28 @@ Four services are provided in `DeviceGatewayServices.xml`:
 
 | Service | Description |
 |---|---|
-| `run#GatewayDeviceRequest` | Implements `run#DeviceRequestInternal`; dispatches MQTT write/subscribe/unsubscribe and OPC UA write/subscribe/unsubscribe to the gateway via REST |
+| `run#GatewayDeviceRequest` | Implements `run#DeviceRequestInternal`; forwards every gateway-managed `DeviceRequest` to a single REST endpoint and lets the gateway dispatch internally |
 | `export#DeviceConfig` | Triggers a recipe export via `POST /api/device-config/export`; accepts `deviceRuleSetId` (required), `deviceId` and `deviceRuleId` (optional filters), and `requestName` (the Moqui-side DeviceRequest holding the gateway base URL); returns one file per priority group |
 | `transfer#DeviceContent` | Reads a `DeviceContent` file via the Moqui resource system and streams it Base64-encoded to `POST /api/device-content/transfer/{gwRequestName}` for SFTP or local file transfer |
 | `receive#GatewayNotification` | Receives inbound error / recovery callbacks from the gateway (`gateway.inbound.error.notification.uri`); logs warnings on `inboundError` and info on `inboundRecovered` |
 
 ### Request type dispatch
 
-`run#GatewayDeviceRequest` maps `requestTypeEnumId` to the correct gateway REST endpoint:
+`run#GatewayDeviceRequest` always calls the same gateway REST endpoint:
 
 | `requestTypeEnumId` | Gateway endpoint |
 |---|---|
-| `DrtWrite`, `DrtConfigWrite`, `DrtRead` | `POST /api/device-request/run/{query}` |
-| `DrtSubscribe`, `DrtEvent`, `DrtStateChange`, `DrtCyclic` | `POST /api/device-request/subscribe/{query}` |
-| `DrtUnsubscribe` | `POST /api/device-request/unsubscribe/{query}` |
+| Any gateway-supported request type | `POST /api/device-request/run/{requestName}` |
 
 ### Seed data example
 
 ```sql
 -- 1. Register the gateway process as a Device
-INSERT INTO DEVICE (DEVICE_ID, DEVICE_NAME) VALUES ('moqui-device-gateway1', 'Moqui Device Gateway 1');
+INSERT INTO DEVICE (DEVICE_ID, DEVICE_TYPE_ENUM_ID)
+VALUES ('moqui-device-gateway1', 'DtIoTGateway');
+
+INSERT INTO PHYSICAL_DEVICE (DEVICE_ID, DEVICE_NAME)
+VALUES ('moqui-device-gateway1', 'Moqui Device Gateway 1');
 
 -- 2. Moqui-side routing DeviceRequest (triggers gateway via REST)
 INSERT INTO DEVICE_REQUEST (REQUEST_NAME, DEVICE_ID, ROUTER_ENUM_ID, REQUEST_TYPE_ENUM_ID,
@@ -121,6 +123,10 @@ VALUES ('GW1_MQTT_PUBLISH',
 INSERT INTO DEVICE_REQUEST (REQUEST_NAME, DEVICE_ID, REQUEST_TYPE_ENUM_ID, BROKER_URI, QUERY)
 VALUES ('VPL_MQTT_PUBLISH_REQ', 'virtual-plc-1', 'DrtWrite',
         'paho-mqtt5:?brokerUrl=tcp://broker:1883&clientId=gw-out', 'virtual_plc_reference');
+
+-- 4. Add at least one item on the Moqui-side wrapper, otherwise run#DeviceRequest returns early
+INSERT INTO DEVICE_REQUEST_ITEM (REQUEST_NAME, PARAMETER_ID, SEQUENCE_NUM, QUERY)
+VALUES ('GW1_MQTT_PUBLISH', 'VPL_PARAM_REFERENCE', 1, 'virtual_plc_reference');
 ```
 
 `run#DeviceRequest` on the Moqui side applies the `onlyChangedParameters` guard before calling
@@ -129,6 +135,11 @@ VALUES ('VPL_MQTT_PUBLISH_REQ', 'virtual-plc-1', 'DrtWrite',
 ---
 
 ## Use cases
+
+Seed-data template catalog for automation work:
+
+- [docs/device-request-seed-templates.md](docs/device-request-seed-templates.md)
+- `src/test/resources/device-request-template-catalog.sql`
 
 ### 1. MQTT inbound — device data → gateway → database
 
@@ -188,13 +199,14 @@ curl -X POST http://localhost:8081/api/device-request/run/VPL_MQTT_PUBLISH_REQ \
 
 **What happens**:
 
-1. `GatewayRequestService.runMqttWrite()` loads the `DEVICE_REQUEST` and its items from DB.
-2. For each `DEVICE_REQUEST_ITEM`, it resolves the topic from `ITEM.QUERY` (or `REQUEST.QUERY`),
+1. The REST layer loads the gateway-side `DEVICE_REQUEST` as a `RequestContext` from the shared DB.
+2. `GatewayRequestService.dispatch()` recognises a broker-managed write request and calls `runMqttWrite()`.
+3. For each `DEVICE_REQUEST_ITEM`, it resolves the topic from `ITEM.QUERY` (or `REQUEST.QUERY`),
    builds the Camel endpoint URI from `DEVICE_REQUEST.BROKER_URI + topic`, and publishes:
    ```json
    {"parameterId":"VPL_PARAM_REFERENCE","numericValue":300.0}
    ```
-3. After all items are published, fires the optional `mqtt.write.afterPublish.uri` callback
+4. After all items are published, fires the optional `mqtt.write.afterPublish.uri` callback
    (fire-and-forget via SEDA).
 
 **Example response**:
@@ -222,7 +234,7 @@ via the standard inbound path (see use case 1).
 **Trigger via REST**:
 
 ```bash
-curl -X POST http://localhost:8081/api/device-request/subscribe/VPL_MQTT_SUB_REQ \
+curl -X POST http://localhost:8081/api/device-request/run/VPL_MQTT_SUB_REQ \
      -H 'X-API-Key: change-me-in-production'
 ```
 
@@ -231,11 +243,12 @@ The `DEVICE_REQUEST` must have `REQUEST_TYPE_ENUM_ID` in
 
 **What happens**:
 
-1. For each distinct topic (resolved from `DEVICE_REQUEST_ITEM.QUERY` or `DEVICE_REQUEST.QUERY`),
+1. `GatewayRequestService.dispatch()` recognises a subscribe-type request and delegates to `subscribeMqtt()`.
+2. For each distinct topic (resolved from `DEVICE_REQUEST_ITEM.QUERY` or `DEVICE_REQUEST.QUERY`),
    the gateway builds an endpoint URI `BROKER_URI + topic`.
-2. A Camel route named `device-request-consumer-{requestName}-{index}` is added dynamically.
-3. The route normalises incoming payloads and forwards them to `direct:mqtt-read-device-request`.
-4. If the route for a given `routeId` already exists, it is not duplicated.
+3. A Camel route named `device-request-consumer-{requestName}-{index}` is added dynamically.
+4. The route normalises incoming payloads and forwards them to `direct:mqtt-read-device-request`.
+5. If the route for a given `routeId` already exists, it is not duplicated.
 
 **Example response**:
 
@@ -252,7 +265,7 @@ The `DEVICE_REQUEST` must have `REQUEST_TYPE_ENUM_ID` in
 
 ```bash
 # DeviceRequest with REQUEST_TYPE_ENUM_ID = DrtUnsubscribe, PARENT_REQUEST_NAME = VPL_MQTT_SUB_REQ
-curl -X POST http://localhost:8081/api/device-request/unsubscribe/VPL_MQTT_UNSUB_REQ \
+curl -X POST http://localhost:8081/api/device-request/run/VPL_MQTT_UNSUB_REQ \
      -H 'X-API-Key: change-me-in-production'
 ```
 
@@ -267,7 +280,7 @@ Incoming `DataValue` events are normalised (unwrapped from `Variant`) and persis
 **Trigger via REST**:
 
 ```bash
-curl -X POST http://localhost:8081/api/device-request/subscribe/VPL_OPCUA_READ_REQ \
+curl -X POST http://localhost:8081/api/device-request/run/VPL_OPCUA_READ_REQ \
      -H 'X-API-Key: change-me-in-production'
 ```
 
@@ -280,6 +293,9 @@ Each `DEVICE_REQUEST_ITEM.QUERY` holds the OPC UA node id (e.g. `ns=2;s=virtual_
 The polling interval for OPC UA subscription sampling is taken from `DEVICE_REQUEST.POLLING_INTERVAL`
 (in milliseconds).
 
+As for MQTT, the REST layer always enters `direct:dispatch-device-request`; the dispatcher then
+chooses `subscribeOpcUa()` from the `DeviceRequest` metadata.
+
 **Dynamic route URI example**:
 ```
 milo-client:opc.tcp://127.0.0.1:4840/milo?node=RAW(ns=2;s=virtual_plc_feedback)&clientId=VPL_OPCUA_READ_REQ-0&bridgeErrorHandler=true&samplingInterval=100
@@ -288,7 +304,7 @@ milo-client:opc.tcp://127.0.0.1:4840/milo?node=RAW(ns=2;s=virtual_plc_feedback)&
 **Unsubscribe** works the same way as for MQTT (use case 3):
 
 ```bash
-curl -X POST http://localhost:8081/api/device-request/unsubscribe/VPL_OPCUA_UNSUB_REQ \
+curl -X POST http://localhost:8081/api/device-request/run/VPL_OPCUA_UNSUB_REQ \
      -H 'X-API-Key: change-me-in-production'
 ```
 
@@ -309,6 +325,9 @@ curl -X POST http://localhost:8081/api/device-request/run/VPL_OPCUA_WRITE_REQ \
 
 The `DEVICE_REQUEST` must be `DrtWrite` and must reference an OPC UA `DEVICE_CONNECTION`.
 Each `DEVICE_REQUEST_ITEM.QUERY` holds the target node id.
+
+The REST endpoint remains the same unified `/api/device-request/run/{requestName}` entrypoint;
+the dispatcher selects `runOpcUaWrite()` because the request is direct and `DRIVER_ENUM_ID = DcdOpcUa`.
 
 **Value resolution** (in priority order):
 
@@ -524,26 +543,24 @@ HTTP 401
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/device-request/run/{requestName}` | Execute a write or subscribe request |
-| `POST` | `/api/device-request/write/{requestName}` | Alias for `/run/{requestName}` (backward compat) |
-| `POST` | `/api/device-request/subscribe/{requestName}` | Register a live subscription |
-| `POST` | `/api/device-request/unsubscribe/{requestName}` | Remove a live subscription |
+| `POST` | `/api/device-request/run/{requestName}` | Central gateway entrypoint; dispatches read/write/subscribe/unsubscribe from DB metadata |
 | `POST` | `/api/device-config/export` | Export a device config recipe file |
 | `GET` | `/q/health` | Quarkus health (liveness + readiness) |
 
 ### Request type routing
 
-`/run` and `/write` inspect `DEVICE_REQUEST.REQUEST_TYPE_ENUM_ID` and `CONNECTION_NAME` to dispatch:
+`/api/device-request/run/{requestName}` inspects `DEVICE_REQUEST.REQUEST_TYPE_ENUM_ID`,
+`CONNECTION_NAME`, `BROKER_URI`, and the related `DEVICE_REQUEST_ITEM` rows to dispatch:
 
 | `REQUEST_TYPE_ENUM_ID` | Driver | Dispatched to |
 |---|---|---|
-| `DrtWrite`, `DrtConfigWrite` | — | `direct:mqtt-write-device-request` |
-| `DrtWrite`, `DrtConfigWrite` | `DcdOpcUa` | `direct:opcua-write-device-request` |
-| `DrtCyclic`, `DrtSubscribe`, `DrtEvent`, `DrtStateChange` | — | `direct:mqtt-subscribe-device-request` |
-| `DrtCyclic`, `DrtSubscribe`, `DrtEvent`, `DrtStateChange` | `DcdOpcUa` | `direct:opcua-subscribe-device-request` |
+| `DrtWrite`, `DrtConfigWrite` | broker-managed | `GatewayRequestService.runMqttWrite()` |
+| `DrtWrite`, `DrtConfigWrite` | `DcdOpcUa` | `GatewayRequestService.runOpcUaWrite()` |
+| `DrtRead` | `DcdOpcUa` | `GatewayRequestService.runRead()` |
+| `DrtCyclic`, `DrtSubscribe`, `DrtEvent`, `DrtStateChange` | broker-managed | `GatewayRequestService.subscribeMqtt()` |
+| `DrtCyclic`, `DrtSubscribe`, `DrtEvent`, `DrtStateChange` | `DcdOpcUa` | `GatewayRequestService.subscribeOpcUa()` |
+| `DrtUnsubscribe` | any supported gateway-managed request | `GatewayRequestService.unsubscribe()` |
 | Any other | — | HTTP 400 |
-
-`/subscribe` accepts only subscribe-type requests; `/unsubscribe` only accepts `DrtUnsubscribe`.
 
 ### Error responses
 
@@ -609,28 +626,91 @@ When a subscription route is registered for a single item, the raw value (unwrap
 
 | Route ID | Trigger | Description |
 |---|---|---|
+| `dispatch-device-request` | `direct:dispatch-device-request` | Single dispatcher route, mirroring the thin service style used by `run#Plc4jRequest` |
 | `mqtt-read-device-request-consumer` | `mqtt.read.consume.uri` (broker or SEDA) | Static MQTT consumer entrypoint; auto-start controlled by `mqtt.read.route.autoStartup` |
 | `mqtt-read-device-request` | `direct:mqtt-read-device-request` | Sets MQTT-specific exchange properties, delegates to `store-device-request-inbound` |
 | `store-device-request-inbound` | `direct:store-device-request-inbound` | Shared inbound persistence route: routes to `PARAMETER_LOG` insert or `PARAMETER` update depending on `purposeEnumId` |
-| `mqtt-write-device-request` | `direct:mqtt-write-device-request` | Delegates to `gatewayRequestService.runMqttWrite()` |
-| `mqtt-subscribe-device-request` | `direct:mqtt-subscribe-device-request` | Delegates to `gatewayRequestService.subscribeMqtt()` |
 | `opcua-read-device-request-consumer` | `opcua.read.consume.uri` (SEDA, disabled by default) | Static OPC UA consumer entrypoint |
 | `opcua-read-device-request` | `direct:opcua-read-device-request` | Sets OPC UA-specific exchange properties, delegates to `store-device-request-inbound` |
-| `opcua-write-device-request` | `direct:opcua-write-device-request` | Delegates to `gatewayRequestService.runOpcUaWrite()` |
-| `opcua-subscribe-device-request` | `direct:opcua-subscribe-device-request` | Delegates to `gatewayRequestService.subscribeOpcUa()` |
 | `run-device-config-export` | `direct:run-device-config-export` | SQL fetch → Codesys recipe format → `direct:transfer-file` |
 | `transfer-file` | `direct:transfer-file` | File/SFTP transfer to primary endpoint, optionally to secondary |
 | `transfer-device-content` | `direct:transfer-device-content` | Streams device content (G-Code, firmware, CNC programs) to a dynamic URI set by the caller |
 | `plc-log-consumer` | `plc.log.consume.uri` (broker or SEDA) | PLC diagnostic log consumer; auto-start controlled by `plc.log.route.autoStartup` |
 | `plc-log-ingest` | `direct:plc-log-ingest` | Transforms CODESYS LoggerFacade batch format; routes entries with `source` to `PARAMETER_LOG` (Path A) and entries without `source` to `DEVICE_LOG` (Path B); the two paths are isolated — a failure in one does not suppress the other |
-| `plc-log-subscribe-device-request` | `direct:plc-log-subscribe-device-request` | Dynamic MQTT subscription for PLC log data (purpose `DrpLogging`); registers a per-request consumer that forwards batches to `direct:plc-log-ingest` instead of the standard MQTT ingest path |
 | `device-request-consumer-{name}-{n}` | Dynamic (MQTT topic or OPC UA node) | Per-item subscription routes registered at runtime |
+
+---
+
+## Route entrypoints guide
+
+This section follows the `from(...)` declarations in `GatewayRouteBuilder.java`.
+Each `from(...)` is the start of a Camel route: it tells the gateway where an event enters and which pipeline takes over from there.
+
+### Central dispatch
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("direct:dispatch-device-request")` | Internal single entrypoint for gateway-managed `DeviceRequest` execution. The REST layer loads a `RequestContext` from DB and sends it here; Camel then delegates to `GatewayRequestService.dispatch()`. |
+
+### Static inbound consumers
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("{{mqtt.read.consume.uri}}")` | Static MQTT consumer. Reads raw inbound MQTT payloads from the URI configured in `application.properties`, converts JSON, and forwards to `direct:mqtt-read-device-request`. |
+| `from("{{opcua.read.consume.uri}}")` | Static OPC UA consumer. Reads inbound payloads from the configured URI and forwards them to `direct:opcua-read-device-request`. Usually disabled in favor of dynamic subscriptions. |
+| `from("{{plc.log.consume.uri}}")` | Static PLC diagnostic log consumer. Reads CODESYS LoggerFacade batches and forwards them to `direct:plc-log-ingest`. |
+
+### Protocol-specific inbound adapters
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("direct:mqtt-read-device-request")` | Internal MQTT inbound adapter. Sets MQTT-specific exchange properties such as DB storage URIs and then forwards to the shared persistence route. |
+| `from("direct:opcua-read-device-request")` | Internal OPC UA inbound adapter. Sets OPC-UA-specific storage properties and forwards to the shared persistence route. |
+
+### Shared persistence pipeline
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("direct:store-device-request-inbound")` | Shared inbound persistence route. Receives normalized rows and decides whether to update `PARAMETER` or insert into `PARAMETER_LOG` based on `purposeEnumId`. |
+| `from("direct:store-parameter-batch")` | Helper route used only by the shared persistence pipeline for batch updates to `PARAMETER`. Keeps DB error handling separate and readable. |
+| `from("direct:store-log-batch")` | Helper route used only by the shared persistence pipeline for batch inserts into `PARAMETER_LOG`. |
+| `from("direct:after-store-callback")` | Optional asynchronous callback route executed after successful persistence when `afterStoreEnabled=true`. |
+
+### Export and transfer helpers
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("direct:run-device-config-export")` | Internal entrypoint for recipe export. Delegates to `GatewayRequestService.exportDeviceConfig()`, which queries DB metadata, builds files, and emits the response. |
+| `from("direct:transfer-file")` | Internal file transfer route. Sends a generated file to `file.transfer.uri` and optionally to `file.transfer.uri.2`. |
+| `from("direct:transfer-device-content")` | Internal device-content transfer route. Sends firmware/G-code/CNC program bytes to the dynamic URI stored in the `gatewayTransferUri` header. |
+
+### PLC log processing
+
+| `from(...)` | Purpose |
+|---|---|
+| `from("direct:plc-log-ingest")` | Main PLC log ingestion route. Splits the batch into rows with `source` and rows without `source`, then delegates to the two specialized helper routes below. |
+| `from("direct:plc-log-ingest-with-source")` | Handles PLC log rows that map to logical parameters. Ensures the shared `PlcLoggerDef` and `PARAMETER` rows exist, then reuses `direct:store-device-request-inbound` to write `PARAMETER_LOG`. |
+| `from("direct:plc-log-ingest-without-source")` | Handles PLC log rows that do not map to a parameter. Writes them directly to `DEVICE_LOG`. |
+
+### Dynamic subscriptions
+
+The routes above are static declarations. At runtime, `GatewayRequestService.subscribeMqtt()` and
+`subscribeOpcUa()` also create dynamic routes named like:
+
+```text
+device-request-consumer-{REQUEST_NAME}-0
+device-request-consumer-{REQUEST_NAME}-1
+```
+
+Those dynamic routes are created from the `DeviceRequest` metadata itself and are the mechanism
+used for live MQTT and OPC UA subscriptions.
 
 ---
 
 ## Dynamic subscription lifecycle
 
-When `subscribe` is called, the gateway creates one Camel route per unique topic or OPC UA node:
+When a subscribe-type `DeviceRequest` is sent to `/api/device-request/run/{requestName}`, the
+dispatcher creates one Camel route per unique topic or OPC UA node:
 
 ```
 device-request-consumer-{REQUEST_NAME}-0
@@ -727,7 +807,7 @@ the config read pool and vice versa.
 | Property | Default | Description |
 |---|---|---|
 | `mqtt.write.sql.query` | SELECT from `DEVICE_REQUEST` + items + audit log | SQL to fetch items for a write request |
-| `mqtt.write.fetch.uri` | SQL endpoint built from `mqtt.write.sql.query` | Fetch endpoint (used by the Camel XML route; the Java service bypasses this) |
+| `mqtt.write.fetch.uri` | SQL endpoint built from `mqtt.write.sql.query` | Legacy/helper fetch endpoint; current write dispatch is driven by Java service code |
 | `mqtt.write.afterPublish.enabled` | `true` | Fire afterPublish callback after all items are published |
 | `mqtt.write.afterPublish.uri` | `seda:mqtt-write-device-request-audit` | afterPublish callback endpoint |
 
@@ -1136,15 +1216,15 @@ The gateway ships with Docker Compose files split by purpose:
 
 | File | Purpose | Description |
 |---|---|---|
-| `src/test/docker/db-compose.yml` | **Test / development only** | Starts a standalone PostgreSQL 18 on host port `5434`; never used in production |
+| `docker/postgres-compose.yml` | **Test / development only** | Starts a standalone PostgreSQL 18 on host port `5434`; never used in production |
 | `docker/gateway-compose.yml` | Production / standalone deployment | Gateway container; reaches the DB by container name on `moqui-gateway-net` |
 
-`src/test/docker/db-compose.yml` creates the Docker network `moqui-gateway-net` that `gateway-compose.yml` expects as external.
+`docker/postgres-compose.yml` creates the Docker network `moqui-gateway-net` that `gateway-compose.yml` expects as external.
 The matching schema initialisation script (`src/test/resources/db/init.sql`) is a **test artifact** — it creates a minimal schema for standalone testing only. In production the Moqui entity engine creates all required tables on its own startup.
 
 **Prerequisites on the target server:** Java 21+, Maven 3.9+, Docker.
 
-> **Database note:** `db-compose.yml` starts a bare PostgreSQL instance (no init scripts —
+> **Database note:** `postgres-compose.yml` starts a bare PostgreSQL instance (no init scripts —
 > same pattern as `moqui-framework/docker/postgres-compose.yml`). The schema must be applied
 > once manually after first startup (step 4 below).
 > In production the gateway connects directly to the main Moqui DB; Moqui's entity engine
@@ -1160,8 +1240,8 @@ mvn package -DskipTests
 docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
 
 # 3. Start the test DB (also creates moqui-gateway-net)
-#    db-compose.yml is a test/dev artifact — never used in production
-docker compose -f src/test/docker/db-compose.yml up -d
+#    postgres-compose.yml is a test/dev artifact — never used in production
+docker compose -f docker/postgres-compose.yml up -d
 
 # 4. Apply the schema (standalone testing only — run once after first DB start)
 #    init.sql is a test artifact; in production Moqui creates all tables automatically
@@ -1229,7 +1309,9 @@ MQTT endpoints are replaced by SEDA; OPC UA endpoints are disabled.
 
 ### Integration tests
 
-Require live PostgreSQL on `localhost:5432` and (for MQTT tests) Artemis MQTT on `localhost:1883`.
+Require live PostgreSQL on `localhost:5434` when using the standalone test DB
+(`docker/postgres-compose.yml`), and Artemis MQTT on `localhost:1883` for MQTT tests.
+If you run against the full Moqui stack instead, PostgreSQL is typically on `localhost:5432`.
 Bring up the baseline with Docker (see next section), then run explicitly:
 
 ```bash
@@ -1328,15 +1410,15 @@ This walkthrough triggers real DB writes using only `mosquitto_pub` and `psql`.
 | Component | Default address |
 |---|---|
 | Artemis MQTT broker | `tcp://localhost:1883` (user/pass: `artemis`/`artemis`) |
-| PostgreSQL | `localhost:5432/moqui` (user/pass: `moqui`/`moqui`) |
+| PostgreSQL | `localhost:5434/moqui` with standalone test DB, or `localhost:5432/moqui` with full Moqui stack |
 | moqui-device-gateway | running with `%integration` profile |
 
 **Step 1 — start the infrastructure**
 
 ```bash
-# Standalone DB (see docker/db-compose.yml)
+# Standalone DB (see docker/postgres-compose.yml)
 cd moqui-device-gateway
-docker compose -f docker/db-compose.yml up -d
+docker compose -f docker/postgres-compose.yml up -d
 
 # Or, when using the full Moqui stack (moqui-framework/docker):
 # docker compose -f postgres-compose.yml -p moqui up -d moqui-database
@@ -1417,7 +1499,7 @@ mosquitto_pub \
 Register a live subscription for a `DrtCyclic` request (the gateway will create a dynamic consumer):
 
 ```bash
-curl -s -X POST http://localhost:8081/api/device-request/subscribe/VPL_MQTT_SUB_REQ_TEST \
+curl -s -X POST http://localhost:8081/api/device-request/run/VPL_MQTT_SUB_REQ_TEST \
   -H 'X-API-Key: change-me-in-production'
 ```
 
@@ -1481,9 +1563,9 @@ The `gateway-subscriptions` readiness check reports:
 
 ```bash
 # Option A — standalone DB only (no full Moqui stack required)
-#   db-compose.yml is a test/dev artifact; data is stored under target/test-db/
+#   postgres-compose.yml is a test/dev artifact; data is stored under docker/db/postgres/
 cd moqui-device-gateway
-docker compose -f src/test/docker/db-compose.yml up -d
+docker compose -f docker/postgres-compose.yml up -d
 mvn quarkus:dev -Dquarkus.profile=integration \
     -Dquarkus.datasource.jdbc.url=jdbc:postgresql://localhost:5434/moqui
 

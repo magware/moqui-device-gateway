@@ -86,7 +86,7 @@ class GatewaySeededRouteIntegrationTest {
 
             @SuppressWarnings("unchecked")
             Map<String, Object> result = producer.requestBody(
-                "direct:mqtt-write-device-request",
+                "direct:dispatch-device-request",
                 gatewayRequestService.loadRequestContext(seed("VPL_MQTT_PUBLISH_REQ")),
                 Map.class
             );
@@ -118,7 +118,7 @@ class GatewaySeededRouteIntegrationTest {
     void mqttSubscribeOfficialUseCaseIngestsVirtualPlcTopics() throws Exception {
         @SuppressWarnings("unchecked")
         Map<String, Object> subscribeResult = producer.requestBody(
-            "direct:mqtt-subscribe-device-request",
+            "direct:dispatch-device-request",
             gatewayRequestService.loadRequestContext(seed("VPL_MQTT_SUB_REQ")),
             Map.class
         );

@@ -4,11 +4,12 @@ services:
     container_name: moqui-log-database
     restart: unless-stopped
     ports:
-      - 127.0.0.1:5434:5432
+      - 127.0.0.1:5432:5432
     volumes:
-      - ../../../target/test-db/postgres:/var/lib/postgresql
+      - ./db/postgres:/var/lib/postgresql
     environment:
       - POSTGRES_DB=moqui
+      - POSTGRES_DB_SCHEMA=public
       - POSTGRES_USER=moqui
       - POSTGRES_PASSWORD=moqui
     healthcheck:

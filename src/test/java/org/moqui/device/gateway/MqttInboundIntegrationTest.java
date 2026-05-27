@@ -24,8 +24,9 @@ import static org.junit.jupiter.api.Assertions.*;
  * Integration test: mosquitto_pub simulation → ActiveMQ Artemis → Camel → PARAMETER_LOG.
  *
  * Prerequisite infrastructure (start before running tests):
- *   cd docker
- *   docker compose -f postgres-compose.yml  -p moqui up -d   # wait for bootstrap
+ *   cd moqui-device-gateway
+ *   docker compose -f docker/postgres-compose.yml up -d   # wait for bootstrap
+ *   cd ../moqui-framework/docker
  *   docker compose -f activemq-compose.yml  -p moqui up -d   # wait for health check
  *   # Moqui schema must exist (run 'gradlew load' once, then stop Moqui)
  *

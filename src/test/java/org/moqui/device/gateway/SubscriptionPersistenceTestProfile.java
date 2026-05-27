@@ -10,7 +10,7 @@ import java.util.Map;
  * so the test never touches the production data/subscriptions.json.
  * MQTT routes are disabled — no broker is required.
  *
- * Prerequisite: PostgreSQL on localhost:5432 (Quarkus datasource initialization).
+ * Prerequisite: PostgreSQL on localhost:5434 (Quarkus datasource initialization).
  * Run: mvn test -Dquarkus.profile=integration -Dtest=SubscriptionPersistenceTest
  */
 public class SubscriptionPersistenceTestProfile extends IntegrationTestProfile {

@@ -22,7 +22,7 @@ import jakarta.inject.Inject;
  * from a SEDA endpoint rather than an external HTTP endpoint.
  *
  * Does NOT require an MQTT broker — all Camel routes use SEDA endpoints.
- * Does require PostgreSQL on localhost:5432 (Quarkus datasource initialization).
+ * Does require PostgreSQL on localhost:5434 (Quarkus datasource initialization).
  *
  * Run:
  *   mvn test -Dquarkus.profile=integration -Dtest=InboundErrorNotifierTest
