@@ -17,7 +17,7 @@ import jakarta.inject.Named;
  *   sql:{{query}}?dataSource=#{{camel.sql.datasource}} (transactional DB)
  *   sql:{{query}}?dataSource=#{{camel.sql.log.datasource}} (log DB)
  *
- * Both datasources can point to the same DB during testing (standalone moqui-log-database).
+ * Both datasources can point to the same DB during testing (standalone moqui-gateway-database).
  * In production, point the default to the main Moqui DB and "log" to the separate telemetry DB.
  *
  * We inject {@code AgroalDataSource} rather than plain {@code DataSource} to avoid CDI

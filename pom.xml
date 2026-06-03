@@ -151,6 +151,11 @@
             <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-h2</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -195,6 +200,7 @@
                         <exclude>**/MqttInboundIntegrationTest.java</exclude>
                         <exclude>**/GatewaySeededRouteIntegrationTest.java</exclude>
                         <exclude>**/OpcUaGatewayIntegrationTest.java</exclude>
+                        <exclude>**/PlcLogIngestIntegrationTest.java</exclude>
                     </excludes>
                 </configuration>
             </plugin>

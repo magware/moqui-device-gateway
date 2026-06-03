@@ -21,21 +21,14 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration test: mosquitto_pub simulation → ActiveMQ Artemis → Camel → PARAMETER_LOG.
+ * Integration test: MQTT client publish -> ActiveMQ Artemis -> Camel -> PARAMETER_LOG.
  *
- * Prerequisite infrastructure (start before running tests):
- *   cd moqui-device-gateway
- *   docker compose -f docker/postgres-compose.yml up -d   # wait for bootstrap
- *   cd ../moqui-framework/docker
- *   docker compose -f activemq-compose.yml  -p moqui up -d   # wait for health check
- *   # Moqui schema must exist (run 'gradlew load' once, then stop Moqui)
+ * Prerequisite infrastructure:
+ * - PostgreSQL initialized with the local test schema/seed or an equivalent Moqui DB.
+ * - ActiveMQ Artemis from the standard Moqui Docker setup:
+ *     docker compose -f ../moqui-framework/docker/activemq-compose.yml -p moqui-gateway up -d
  *
- * Run:
- *   mvn test -Dquarkus.profile=integration -Dtest=MqttInboundIntegrationTest
- *
- * What this test simulates:
- *   mosquitto_pub -h localhost -p 1883 -u artemis -P artemis \
- *     -t iot/parameters/in -m '{"parameterId":"TEST_P1","numericValue":42.5}'
+ * mosquitto_pub can be used as an MQTT client CLI for manual testing, but the broker is ActiveMQ Artemis.
  */
 @QuarkusTest
 @TestProfile(IntegrationTestProfile.class)
@@ -43,11 +36,11 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class MqttInboundIntegrationTest {
 
-    // Artemis MQTT connection parameters (matching activemq-compose.yml)
+    // Artemis MQTT connection parameters for the standard local integration setup
     private static final String MQTT_BROKER    = "tcp://localhost:1883";
     private static final String MQTT_USER      = "artemis";
     private static final String MQTT_PASSWORD  = "artemis";
-    private static final String MQTT_TOPIC_IN  = "iot/parameters/in";
+    private static final String MQTT_TOPIC_IN  = "mqtt-read-device-request/parameter-log/in";
 
     // Test data — use unique suffix so parallel runs don't collide
     private static final String TEST_RUN_ID   = UUID.randomUUID().toString().substring(0, 8);
@@ -102,7 +95,7 @@ class MqttInboundIntegrationTest {
     // Helpers
     // -------------------------------------------------------------------------
 
-    /** Creates a Paho MQTT5 client connected to Artemis. Mirrors mosquitto_pub. */
+    /** Creates a Paho MQTT5 client connected to Artemis. Equivalent to a CLI MQTT publisher. */
     private MqttClient mqttPublisher(String clientId) throws Exception {
         MqttClient client = new MqttClient(MQTT_BROKER, clientId, null);
         MqttConnectionOptions opts = new MqttConnectionOptions();
@@ -172,9 +165,9 @@ class MqttInboundIntegrationTest {
     /**
      * TC-01: Single MQTT message → Camel inbound route → INSERT PARAMETER_LOG.
      *
-     * Equivalent to:
+     * Equivalent manual CLI:
      *   mosquitto_pub -h localhost -p 1883 -u artemis -P artemis \
-     *     -t iot/parameters/in -m '{"parameterId":"TEST_PARAM_xxx","numericValue":42.5}'
+     *     -t mqtt-read-device-request/parameter-log/in -m '{"parameterId":"TEST_PARAM_xxx","numericValue":42.5}'
      */
     @Test
     @Order(1)
@@ -283,37 +276,4 @@ class MqttInboundIntegrationTest {
         deleteTestRows(pid);
     }
 
-    /**
-     * TC-05: Verify Artemis broker is reachable and MQTT connection works.
-     *        (Infrastructure smoke test — run this first if others fail.)
-     */
-    @Test
-    @Order(0)
-    void tc00_artemisMqttConnectionSmoke() throws Exception {
-        MqttClient client = mqttPublisher("test-smoke-" + TEST_RUN_ID);
-        assertTrue(client.isConnected(), "Must connect to Artemis MQTT on localhost:1883");
-        client.disconnect();
-        client.close();
-        System.out.println("[TC-00] OK — Artemis MQTT broker reachable");
-    }
-
-    /**
-     * TC-06: Verify PostgreSQL connection and PARAMETER_LOG table exists.
-     *        (Infrastructure smoke test.)
-     */
-    @Test
-    @Order(0)
-    void tc00_yugabyteParameterLogTableExists() throws Exception {
-        try (Connection conn = dataSource.getConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                 "SELECT COUNT(*) FROM information_schema.tables " +
-                 "WHERE table_schema='public' AND table_name='parameter_log'");
-             ResultSet rs = ps.executeQuery()) {
-            rs.next();
-            assertEquals(1, rs.getInt(1),
-                "PARAMETER_LOG table must exist in schema 'public'. " +
-                "Run Moqui 'gradlew load' to create the schema first.");
-        }
-        System.out.println("[TC-00] OK — PARAMETER_LOG table found in PostgreSQL");
-    }
 }

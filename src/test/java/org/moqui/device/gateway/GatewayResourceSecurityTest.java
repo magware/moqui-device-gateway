@@ -4,9 +4,11 @@ import static org.hamcrest.Matchers.equalTo;
 import org.junit.jupiter.api.Test;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import static io.restassured.RestAssured.given;
 
 @QuarkusTest
+@TestProfile(LocalNoInfraTestProfile.class)
 class GatewayResourceSecurityTest {
 
     @Test

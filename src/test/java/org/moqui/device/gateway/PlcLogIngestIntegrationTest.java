@@ -33,10 +33,12 @@ import jakarta.inject.Inject;
  * Simulates the CODESYS LoggerFacade MQTT appender publishing batches in the
  * numbered-object format: {"1":{loggerName, source, type, numericValue|message, ...}, ...}
  *
- * Prerequisite infrastructure:
- *   docker compose -f moqui-framework/docker/postgres-compose.yml  -p moqui up -d
- *   docker compose -f moqui-framework/docker/activemq-compose.yml  -p moqui up -d
- *   # Moqui schema must exist (run 'gradlew load' once)
+ * Requires ActiveMQ Artemis from the standard moqui-framework Docker setup,
+ * or an equivalent MQTT broker reachable through the configured brokerUri.
+ *
+ * Standard infrastructure:
+ *   docker compose -f docker/postgres-compose.yml -p moqui-gateway up -d
+ *   docker compose -f ../moqui-framework/docker/activemq-compose.yml -p moqui-gateway up -d
  *
  * Run:
  *   mvn test -Dquarkus.profile=integration -Dtest=PlcLogIngestIntegrationTest

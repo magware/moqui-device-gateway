@@ -7,8 +7,7 @@ import java.util.Map;
  * Test profile for PlcLogIngestIntegrationTest.
  *
  * Extends IntegrationTestProfile (PostgreSQL + Artemis on localhost) and
- * redirects the PLC log consumer to a test-specific topic on the local broker,
- * replacing the default %integration value that points to the remote lab broker.
+ * redirects the PLC log consumer to a test-specific topic on the local/integration MQTT broker.
  * The main MQTT read route is disabled to avoid interference.
  *
  * Prerequisite: same infrastructure as IntegrationTestProfile.
@@ -16,7 +15,7 @@ import java.util.Map;
  */
 public class PlcLogIngestTestProfile extends IntegrationTestProfile {
 
-    static final String PLC_LOG_TOPIC = "test-plc-log-in";
+    static final String PLC_LOG_TOPIC = "plc-log-consumer/test-in";
 
     @Override
     public Map<String, String> getConfigOverrides() {

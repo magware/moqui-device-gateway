@@ -196,9 +196,11 @@ class OpcUaGatewayIntegrationTest {
             st.executeUpdate("DELETE FROM DEVICE_REQUEST_ITEM WHERE REQUEST_NAME LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_REQUEST WHERE REQUEST_NAME LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_CONNECTION WHERE CONNECTION_NAME LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM DEVICE_GROUP_MEMBER WHERE DEVICE_ID LIKE '" + suffixLike + "' OR MEMBER_DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PARAMETER WHERE PARAMETER_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_CONFIG WHERE DEVICE_CONFIG_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PARAMETER_DEF WHERE PARAMETER_DEF_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM DEVICE_GROUP WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PHYSICAL_DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
         }

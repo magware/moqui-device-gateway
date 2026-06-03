@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
@@ -15,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -47,6 +49,68 @@ public class GatewayRequestService {
     private static final TypeReference<Map<String, Object>> MAP_OBJECT = new TypeReference<>() {};
     private static final int OPCUA_WRITE_RETRY_DELAY_MS = 200;
     private static final int OPCUA_WRITE_DEFAULT_TIMEOUT_MS = 5000;
+    private static final String GATEWAY_DEVICE_EXISTS_SQL = """
+        SELECT d.DEVICE_ID
+        FROM DEVICE d
+        JOIN PHYSICAL_DEVICE pd ON pd.DEVICE_ID = d.DEVICE_ID
+        WHERE d.DEVICE_ID = ?
+        """;
+    private static final String GATEWAY_MEMBERSHIP_COUNT_SQL = """
+        SELECT COUNT(*) AS CNT
+        FROM DEVICE_GROUP_MEMBER dgm
+        WHERE dgm.MEMBER_DEVICE_ID = ?
+          AND dgm.PURPOSE_ENUM_ID = 'DgmpEdgeGateway'
+          AND (dgm.STATUS_ID IS NULL OR dgm.STATUS_ID = 'DgmsAlive')
+        """;
+    private static final String GATEWAY_DEVICE_SCOPE_COUNT_SQL = """
+        SELECT COUNT(*) AS CNT
+        FROM DEVICE_GROUP_MEMBER gateway_member
+        JOIN DEVICE_GROUP_MEMBER target_member
+            ON target_member.DEVICE_ID = gateway_member.DEVICE_ID
+        WHERE gateway_member.MEMBER_DEVICE_ID = ?
+          AND gateway_member.PURPOSE_ENUM_ID = 'DgmpEdgeGateway'
+          AND (gateway_member.STATUS_ID IS NULL OR gateway_member.STATUS_ID = 'DgmsAlive')
+          AND target_member.MEMBER_DEVICE_ID = ?
+          AND (target_member.STATUS_ID IS NULL OR target_member.STATUS_ID = 'DgmsAlive')
+        """;
+    private static final String STARTUP_SUBSCRIPTION_SQL = """
+        SELECT startup.REQUEST_NAME
+        FROM (
+            SELECT DISTINCT
+                dr.REQUEST_NAME,
+                COALESCE(dr.PRIORITY, 999999) AS SORT_PRIORITY,
+                COALESCE(dr.SEQUENCE_NUM, 999999) AS SORT_SEQUENCE
+            FROM DEVICE_GROUP_MEMBER gateway_member
+            JOIN DEVICE_GROUP_MEMBER target_member
+                ON target_member.DEVICE_ID = gateway_member.DEVICE_ID
+            JOIN DEVICE_REQUEST dr
+                ON dr.DEVICE_ID = target_member.MEMBER_DEVICE_ID
+            WHERE gateway_member.MEMBER_DEVICE_ID = ?
+              AND gateway_member.PURPOSE_ENUM_ID = 'DgmpEdgeGateway'
+              AND (gateway_member.STATUS_ID IS NULL OR gateway_member.STATUS_ID = 'DgmsAlive')
+              AND target_member.MEMBER_DEVICE_ID <> gateway_member.MEMBER_DEVICE_ID
+              AND (target_member.STATUS_ID IS NULL OR target_member.STATUS_ID = 'DgmsAlive')
+              AND target_member.PURPOSE_ENUM_ID IN (
+                  'DgmpProcessPLC',
+                  'DgmpSafetyPLC',
+                  'DgmpController',
+                  'DgmpMotionController',
+                  'DgmpRemoteIO',
+                  'DgmpSafetyRemoteIO',
+                  'DgmpExtremeConditionRemoteIO'
+              )
+              AND dr.ROUTER_ENUM_ID = 'DrrMoquiDeviceGateway'
+              AND dr.REQUEST_TYPE_ENUM_ID IN (
+                  'DrtSubscribe',
+                  'DrtEvent',
+                  'DrtStateChange',
+                  'DrtCyclic'
+              )
+              AND (dr.FROM_DATE IS NULL OR dr.FROM_DATE <= CURRENT_TIMESTAMP)
+              AND (dr.THRU_DATE IS NULL OR dr.THRU_DATE > CURRENT_TIMESTAMP)
+        ) startup
+        ORDER BY startup.SORT_PRIORITY, startup.SORT_SEQUENCE, startup.REQUEST_NAME
+        """;
 
     private final ConcurrentHashMap<String, Object> subscriptionLocks = new ConcurrentHashMap<>();
 
@@ -61,9 +125,6 @@ public class GatewayRequestService {
 
     @Inject
     ObjectMapper objectMapper;
-
-    @Inject
-    SubscriptionPersistence subscriptionPersistence;
 
     @ConfigProperty(name = "gateway.request.sql")
     String requestSql;
@@ -86,22 +147,52 @@ public class GatewayRequestService {
     @ConfigProperty(name = "device.config.export.fetch.uri")
     String deviceConfigExportFetchUri;
 
+    @ConfigProperty(name = "gateway.device.id")
+    Optional<String> gatewayDeviceId;
+
+    @ConfigProperty(name = "gateway.startup.discovery.enabled", defaultValue = "true")
+    boolean gatewayStartupDiscoveryEnabled;
+
     void onStart(@Observes StartupEvent ev) {
-        for (String requestName : subscriptionPersistence.loadAll()) {
+        if (!gatewayStartupDiscoveryEnabled) {
+            logger.debug("Gateway startup DB discovery is disabled for this profile.");
+            return;
+        }
+        final GatewayIdentityStatus identity;
+        try {
+            identity = inspectGatewayIdentity();
+        } catch (RuntimeException e) {
+            logger.errorf(e, "Gateway startup validation failed before route restore.");
+            return;
+        }
+        if (!identity.ready()) {
+            logger.errorf("Gateway startup validation failed: %s", identity.message());
+            return;
+        }
+
+        List<String> requestNames = loadStartupSubscriptionRequestNames(identity.gatewayDeviceId());
+        int restoredRequests = 0;
+        int restoredRoutes = 0;
+        for (String requestName : requestNames) {
             try {
                 RequestContext context = loadRequestContext(requestName);
+                Map<String, Object> result;
                 if (isPlcLogContext(context)) {
-                    subscribePlcLog(context);
+                    result = subscribePlcLog(context);
                 } else if (isOpcuaContext(context)) {
-                    subscribeOpcUa(context);
+                    result = subscribeOpcUa(context);
                 } else {
-                    subscribeMqtt(context);
+                    result = subscribeMqtt(context);
                 }
-                logger.infof("Restored subscription for DeviceRequest %s on startup.", requestName);
+                restoredRequests++;
+                restoredRoutes += extractRouteCount(result);
+                logger.infof("Restored DB-defined subscription for DeviceRequest %s on startup.", requestName);
             } catch (Exception e) {
-                logger.warnf(e, "Failed to restore subscription for DeviceRequest %s on startup.", requestName);
+                logger.warnf(e, "Failed to restore DB-defined subscription for DeviceRequest %s on startup.", requestName);
             }
         }
+        logger.infof("Gateway %s restored %d DB-defined subscription route(s) from %d DeviceRequest row(s).",
+            identity.gatewayDeviceId(), restoredRoutes, restoredRequests);
     }
 
     public Map<String, Object> dispatch(RequestContext context) {
@@ -250,7 +341,7 @@ public class GatewayRequestService {
         for (int index = 0; index < topicList.size(); index++) {
             String topic = topicList.get(index);
             String routeId = routePrefix(context.requestName()) + index;
-            String consumerUri = buildEndpointUri(context.brokerUri(), topic);
+            String consumerUri = buildMqttConsumerUri(context.brokerUri(), topic, configuredGatewayDeviceId(), context.requestName(), index);
 
             Object lock = subscriptionLocks.computeIfAbsent(routeId, k -> new Object());
             synchronized (lock) {
@@ -265,7 +356,7 @@ public class GatewayRequestService {
             }
         }
 
-        subscriptionPersistence.save(context.requestName());
+        assertAtLeastOneRouteStarted(context.requestName(), routeIdList);
         return Map.of(
             "status", "completed",
             "routeId", "plc-log-subscribe-device-request",
@@ -280,17 +371,13 @@ public class GatewayRequestService {
             throw new IllegalArgumentException("DeviceRequest " + context.requestName() + " does not define brokerUri.");
         }
         warnIfStaticMqttConsumerActive();
-        Map<String, Object> result = registerDynamicRoutes(context, false);
-        subscriptionPersistence.save(context.requestName());
-        return result;
+        return registerDynamicRoutes(context, false);
     }
 
     public Map<String, Object> subscribeOpcUa(RequestContext context) {
         assertSubscribeRequest(context);
         assertOpcUa(context);
-        Map<String, Object> result = registerDynamicRoutes(context, true);
-        subscriptionPersistence.save(context.requestName());
-        return result;
+        return registerDynamicRoutes(context, true);
     }
 
     public Map<String, Object> unsubscribe(RequestContext context) {
@@ -320,8 +407,6 @@ public class GatewayRequestService {
                 + failures.size() + " route(s): " + String.join("; ", failures));
         }
 
-        subscriptionPersistence.remove(targetRequestName);
-
         return Map.of(
             "status", "completed",
             "routeId", "rest-unsubscribe-device-request",
@@ -336,7 +421,7 @@ public class GatewayRequestService {
              PreparedStatement itemsPs = connection.prepareStatement(requestItemsSql)) {
 
             requestPs.setString(1, requestName);
-            String reqName, parentReqName, reqType, purposeId, routerId, connName,
+        String reqName, deviceId, parentReqName, reqType, purposeId, routerId, connName,
                    brokerUri, queryStr, onlyChanged, driverEnumId, driverEnumCode,
                    transportEnumId, transportEnumCode, transportConfig, options;
             Integer timeout, pollingInterval;
@@ -346,6 +431,7 @@ public class GatewayRequestService {
                     throw new IllegalArgumentException("DeviceRequest with name " + requestName + " not found.");
                 }
                 reqName = rs.getString("REQUEST_NAME");
+                deviceId = rs.getString("DEVICE_ID");
                 parentReqName = rs.getString("PARENT_REQUEST_NAME");
                 reqType = rs.getString("REQUEST_TYPE_ENUM_ID");
                 purposeId = rs.getString("PURPOSE_ENUM_ID");
@@ -380,7 +466,7 @@ public class GatewayRequestService {
             }
 
             return new RequestContext(
-                reqName, parentReqName, reqType, purposeId, routerId, connName,
+                reqName, deviceId, parentReqName, reqType, purposeId, routerId, connName,
                 brokerUri, timeout, pollingInterval, queryStr, onlyChanged,
                 driverEnumId, driverEnumCode, transportEnumId, transportEnumCode,
                 transportConfig, options, List.copyOf(items)
@@ -558,7 +644,7 @@ public class GatewayRequestService {
             String routeId = routePrefix(context.requestName()) + index;
             String consumerUri = opcua
                 ? buildOpcUaEndpointUri(context, sourceQuery, true)
-                : buildEndpointUri(context.brokerUri(), sourceQuery);
+                : buildMqttConsumerUri(context.brokerUri(), sourceQuery, configuredGatewayDeviceId(), context.requestName(), index);
 
             Object lock = subscriptionLocks.computeIfAbsent(routeId, k -> new Object());
             synchronized (lock) {
@@ -572,6 +658,8 @@ public class GatewayRequestService {
                 consumerUriList.add(consumerUri);
             }
         }
+
+        assertAtLeastOneRouteStarted(context.requestName(), routeIdList);
 
         return Map.of(
             "status", "completed",
@@ -607,8 +695,10 @@ public class GatewayRequestService {
                 }
             });
         } catch (Exception e) {
-            logger.warnf(e, "Failed to register subscription route %s for request %s on %s — skipping.",
-                routeId, context.requestName(), consumerUri);
+            throw new IllegalStateException(
+                "Failed to register subscription route " + routeId
+                    + " for DeviceRequest " + context.requestName(),
+                e);
         }
     }
 
@@ -718,6 +808,51 @@ public class GatewayRequestService {
         return queryIndex >= 0
             ? baseUri.substring(0, queryIndex) + query + baseUri.substring(queryIndex)
             : baseUri + query;
+    }
+
+    /**
+     * Dynamic MQTT subscriptions must reconnect automatically after temporary broker loss.
+     * We enforce conservative consumer defaults here instead of relying on seed data to
+     * remember component-specific reconnect flags.
+     */
+    public String buildMqttConsumerUri(String baseUri, String query, String gatewayDeviceId, String requestName, int index) {
+        String endpointUri = buildEndpointUri(baseUri, query);
+        if (endpointUri == null || endpointUri.isBlank() || !endpointUri.startsWith("paho-mqtt5:")) {
+            return endpointUri;
+        }
+
+        StringBuilder sb = new StringBuilder(endpointUri);
+        String separator = endpointUri.contains("?") ? "&" : "?";
+        if (!endpointUri.contains("clientId=")) {
+            String clientId = "moqui-gw-"
+                + safeClientIdPart(gatewayDeviceId)
+                + "-"
+                + safeClientIdPart(requestName)
+                + "-"
+                + index;
+            sb.append(separator).append("clientId=").append(clientId);
+            separator = "&";
+        }
+        if (!endpointUri.contains("automaticReconnect=")) {
+            sb.append(separator).append("automaticReconnect=true");
+            separator = "&";
+        }
+        if (!endpointUri.contains("cleanStart=")) {
+            sb.append(separator).append("cleanStart=false");
+            separator = "&";
+        }
+        if (!endpointUri.contains("sessionExpiryInterval=")) {
+            sb.append(separator).append("sessionExpiryInterval=86400");
+            separator = "&";
+        }
+        if (!endpointUri.contains("maxReconnectDelay=")) {
+            sb.append(separator).append("maxReconnectDelay=5000");
+        }
+        return sb.toString();
+    }
+
+    private String safeClientIdPart(String value) {
+        return value == null ? "unknown" : value.replaceAll("[^A-Za-z0-9_-]", "_");
     }
 
     private String buildOpcUaEndpointUri(RequestContext context, String nodeId, boolean consumer) {
@@ -882,8 +1017,10 @@ public class GatewayRequestService {
                 }
             });
         } catch (Exception e) {
-            logger.warnf(e, "Failed to register PLC log subscription route %s for request %s on %s — skipping.",
-                routeId, context.requestName(), consumerUri);
+            throw new IllegalStateException(
+                "Failed to register PLC log subscription route " + routeId
+                    + " for DeviceRequest " + context.requestName(),
+                e);
         }
     }
 
@@ -911,8 +1048,162 @@ public class GatewayRequestService {
         return "device-request-consumer-" + requestName + "-";
     }
 
+    public GatewayIdentityStatus inspectGatewayIdentity() {
+        String gatewayDeviceId = configuredGatewayDeviceId();
+        if (gatewayDeviceId == null || gatewayDeviceId.isBlank()) {
+            return new GatewayIdentityStatus(gatewayDeviceId, false, false, false,
+                "gateway.device.id / GATEWAY_DEVICE_ID is required.");
+        }
+
+        boolean physicalDeviceExists;
+        boolean gatewayMemberFound;
+        try (Connection connection = dataSource.getConnection()) {
+            physicalDeviceExists = queryExists(connection, GATEWAY_DEVICE_EXISTS_SQL, gatewayDeviceId);
+            gatewayMemberFound = physicalDeviceExists
+                && queryCount(connection, GATEWAY_MEMBERSHIP_COUNT_SQL, gatewayDeviceId) > 0;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Unable to validate gateway identity " + gatewayDeviceId, e);
+        }
+
+        if (!physicalDeviceExists) {
+            return new GatewayIdentityStatus(gatewayDeviceId, true, false, false,
+                "Configured gateway.device.id " + gatewayDeviceId + " does not exist as Device + PhysicalDevice.");
+        }
+        if (!gatewayMemberFound) {
+            return new GatewayIdentityStatus(gatewayDeviceId, true, true, false,
+                "Gateway " + gatewayDeviceId + " is not assigned to any DeviceGroup as DgmpEdgeGateway.");
+        }
+        return new GatewayIdentityStatus(gatewayDeviceId, true, true, true, "ready");
+    }
+
+    public void assertGatewayScope(RequestContext context) {
+        if (context == null) {
+            throw new IllegalArgumentException("RequestContext is required.");
+        }
+        if (context.deviceId() == null || context.deviceId().isBlank()) {
+            return;
+        }
+
+        String gatewayDeviceId = configuredGatewayDeviceId();
+        if (gatewayDeviceId.isBlank()) {
+            throw new IllegalStateException("gateway.device.id / GATEWAY_DEVICE_ID is required.");
+        }
+
+        try (Connection connection = dataSource.getConnection()) {
+            int visibleDeviceCount = queryCount(connection, GATEWAY_DEVICE_SCOPE_COUNT_SQL, gatewayDeviceId, context.deviceId());
+            if (visibleDeviceCount <= 0) {
+                throw new SecurityException(
+                    "DeviceRequest " + context.requestName()
+                        + " belongs to device " + context.deviceId()
+                        + ", which is not in the scope of gateway " + gatewayDeviceId + "."
+                );
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException(
+                "Unable to validate gateway scope for request " + context.requestName(),
+                e
+            );
+        }
+    }
+
+    private String configuredGatewayDeviceId() {
+        return gatewayDeviceId.orElse("");
+    }
+
+    public List<String> loadStartupSubscriptionRequestNames(String gatewayDeviceId) {
+        if (gatewayDeviceId == null || gatewayDeviceId.isBlank()) {
+            throw new IllegalStateException("gateway.device.id / GATEWAY_DEVICE_ID is required.");
+        }
+
+        List<String> requestNames = new ArrayList<>();
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement ps = connection.prepareStatement(STARTUP_SUBSCRIPTION_SQL)) {
+            ps.setString(1, gatewayDeviceId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) requestNames.add(rs.getString("REQUEST_NAME"));
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                "Unable to load startup DeviceRequest subscriptions for gatewayDeviceId " + gatewayDeviceId,
+                e
+            );
+        }
+        return requestNames;
+    }
+
+    private boolean queryExists(Connection connection, String sql, String value) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, value);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private int queryCount(Connection connection, String sql, String value) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, value);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    private int queryCount(Connection connection, String sql, String value1, String value2) throws SQLException {
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, value1);
+            ps.setString(2, value2);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : 0;
+            }
+        }
+    }
+
+    private int extractRouteCount(Map<String, Object> result) {
+        Object routeIdList = result.get("routeIdList");
+        return routeIdList instanceof List<?> list ? list.size() : 0;
+    }
+
+    private void assertAtLeastOneRouteStarted(String requestName, List<String> routeIdList) {
+        if (routeIdList == null || routeIdList.isEmpty()) {
+            throw new IllegalStateException(
+                "No Camel subscription route was registered for DeviceRequest " + requestName
+            );
+        }
+
+        List<String> notStarted = new ArrayList<>();
+        for (String routeId : routeIdList) {
+            try {
+                var status = camelContext.getRouteController().getRouteStatus(routeId);
+                if (status == null || !status.isStarted()) notStarted.add(routeId + "=" + status);
+            } catch (Exception e) {
+                notStarted.add(routeId + "=" + e.getMessage());
+            }
+        }
+
+        if (!notStarted.isEmpty()) {
+            throw new IllegalStateException(
+                "Some Camel subscription routes are not started for DeviceRequest "
+                    + requestName + ": " + String.join(", ", notStarted)
+            );
+        }
+    }
+
+    public record GatewayIdentityStatus(
+        String gatewayDeviceId,
+        boolean configured,
+        boolean physicalDeviceExists,
+        boolean gatewayMemberFound,
+        String message
+    ) {
+        public boolean ready() {
+            return configured && physicalDeviceExists && gatewayMemberFound;
+        }
+    }
+
     public record RequestContext(
         String requestName,
+        String deviceId,
         String parentRequestName,
         String requestTypeEnumId,
         String purposeEnumId,

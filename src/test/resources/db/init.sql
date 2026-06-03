@@ -66,6 +66,25 @@ CREATE TABLE IF NOT EXISTS PHYSICAL_DEVICE (
 );
 
 -- -----------------------------------------------------------------------------
+-- DEVICE_GROUP / DEVICE_GROUP_MEMBER  (gateway membership and startup restore)
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS DEVICE_GROUP (
+    DEVICE_ID            VARCHAR(40) PRIMARY KEY,
+    GROUP_NAME           VARCHAR(255)
+);
+
+CREATE TABLE IF NOT EXISTS DEVICE_GROUP_MEMBER (
+    DEVICE_ID            VARCHAR(40) NOT NULL,
+    MEMBER_DEVICE_ID     VARCHAR(40) NOT NULL,
+    PURPOSE_ENUM_ID      VARCHAR(40),
+    SEQUENCE_NUM         INTEGER,
+    DESCRIPTION          VARCHAR(4000),
+    STATUS_ID            VARCHAR(40),
+    STATUS_FLOW_ID       VARCHAR(40),
+    PRIMARY KEY (DEVICE_ID, MEMBER_DEVICE_ID)
+);
+
+-- -----------------------------------------------------------------------------
 -- DEVICE_LOG  (PLC diagnostic log batches — moqui.device.DeviceLog)
 -- Stores CODESYS LoggerFacade entries: deviceId=loggerName, payload=JSON entry.
 -- -----------------------------------------------------------------------------

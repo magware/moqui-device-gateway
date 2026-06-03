@@ -21,11 +21,8 @@ import jakarta.inject.Inject;
  * recordError() call fires a notification without waiting. Notifications are captured
  * from a SEDA endpoint rather than an external HTTP endpoint.
  *
- * Does NOT require an MQTT broker — all Camel routes use SEDA endpoints.
- * Does require PostgreSQL on localhost:5434 (Quarkus datasource initialization).
- *
- * Run:
- *   mvn test -Dquarkus.profile=integration -Dtest=InboundErrorNotifierTest
+ * Does NOT require an MQTT broker or PostgreSQL — the test profile uses SEDA
+ * endpoints and in-memory H2 only.
  */
 @QuarkusTest
 @TestProfile(InboundErrorNotifierTestProfile.class)

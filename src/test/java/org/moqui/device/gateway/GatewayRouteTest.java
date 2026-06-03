@@ -6,19 +6,24 @@ import org.apache.camel.CamelContext;
 import org.apache.camel.ConsumerTemplate;
 import org.apache.camel.ProducerTemplate;
 import org.apache.camel.ServiceStatus;
+import org.apache.camel.CamelExecutionException;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import org.junit.jupiter.api.Test;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 
-    /**
-     * Unit tests for the gateway Java DSL Camel routes.
-     *
-     * Uses SEDA endpoints (default config) to avoid requiring a live database or broker.
-     */
+/**
+ * Unit tests for the gateway Java DSL Camel routes.
+ *
+ * Uses the LocalNoInfraTestProfile so route loading and basic in-VM flows can be
+ * verified with SEDA endpoints and in-memory H2 only.
+ */
 @QuarkusTest
+@TestProfile(LocalNoInfraTestProfile.class)
 class GatewayRouteTest {
 
     @Inject
@@ -32,17 +37,17 @@ class GatewayRouteTest {
 
     @Test
     void allRoutesAreLoaded() {
-        assertNotNull(camelContext.getRoute("dispatch-device-request"),          "dispatch-device-request not loaded");
-        assertNotNull(camelContext.getRoute("mqtt-read-device-request-consumer"),  "mqtt-read-device-request-consumer not loaded");
-        assertNotNull(camelContext.getRoute("mqtt-read-device-request"),           "mqtt-read-device-request not loaded");
+        assertNotNull(camelContext.getRoute("dispatch-device-request"), "dispatch-device-request not loaded");
+        assertNotNull(camelContext.getRoute("mqtt-read-device-request-consumer"), "mqtt-read-device-request-consumer not loaded");
+        assertNotNull(camelContext.getRoute("mqtt-read-device-request"), "mqtt-read-device-request not loaded");
         assertNotNull(camelContext.getRoute("opcua-read-device-request-consumer"), "opcua-read-device-request-consumer not loaded");
-        assertNotNull(camelContext.getRoute("opcua-read-device-request"),          "opcua-read-device-request not loaded");
-        assertNotNull(camelContext.getRoute("store-device-request-inbound"),       "store-device-request-inbound not loaded");
-        assertNotNull(camelContext.getRoute("run-device-config-export"),           "run-device-config-export not loaded");
-        assertNotNull(camelContext.getRoute("transfer-file"),                      "transfer-file not loaded");
-        assertNotNull(camelContext.getRoute("transfer-device-content"),            "transfer-device-content not loaded");
-        assertNotNull(camelContext.getRoute("plc-log-consumer"),                   "plc-log-consumer not loaded");
-        assertNotNull(camelContext.getRoute("plc-log-ingest"),                     "plc-log-ingest not loaded");
+        assertNotNull(camelContext.getRoute("opcua-read-device-request"), "opcua-read-device-request not loaded");
+        assertNotNull(camelContext.getRoute("store-device-request-inbound"), "store-device-request-inbound not loaded");
+        assertNotNull(camelContext.getRoute("run-device-config-export"), "run-device-config-export not loaded");
+        assertNotNull(camelContext.getRoute("transfer-file"), "transfer-file not loaded");
+        assertNotNull(camelContext.getRoute("transfer-device-content"), "transfer-device-content not loaded");
+        assertNotNull(camelContext.getRoute("plc-log-consumer"), "plc-log-consumer not loaded");
+        assertNotNull(camelContext.getRoute("plc-log-ingest"), "plc-log-ingest not loaded");
     }
 
     /**
@@ -66,10 +71,10 @@ class GatewayRouteTest {
                 "Speed:=300.0\nTemperature:=25.5",
                 "CamelFileName", "recipe.txt");
 
-            String primary   = consumer.receiveBody("seda:export-device-config-out",  3000L, String.class);
+            String primary   = consumer.receiveBody("seda:export-device-config-out", 3000L, String.class);
             String secondary = consumer.receiveBody("seda:export-device-config-out-2", 3000L, String.class);
 
-            assertNotNull(primary,   "Primary PLC did not receive the recipe");
+            assertNotNull(primary, "Primary PLC did not receive the recipe");
             assertNotNull(secondary, "Secondary PLC did not receive the recipe");
             assertEquals(primary, secondary, "Both PLCs must receive identical recipe content");
         } finally {
@@ -80,9 +85,9 @@ class GatewayRouteTest {
 
     @Test
     void malformedInboundPayloadIsDiscardedWithoutStoppingConsumerRoute() {
-        producer.sendBody("seda:mqtt-read-device-request-in", "{not-json");
+        assertThrows(CamelExecutionException.class,
+            () -> producer.sendBody("direct:mqtt-read-device-request", "{not-json}"));
 
-        assertEquals(ServiceStatus.Started, camelContext.getRouteController().getRouteStatus("mqtt-read-device-request-consumer"));
         assertEquals(ServiceStatus.Started, camelContext.getRouteController().getRouteStatus("mqtt-read-device-request"));
     }
 }

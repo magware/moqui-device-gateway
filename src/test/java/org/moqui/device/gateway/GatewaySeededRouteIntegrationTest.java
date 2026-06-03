@@ -44,6 +44,14 @@ import jakarta.inject.Inject;
 @TestProfile(IntegrationTestProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class GatewaySeededRouteIntegrationTest {
+    private static final String MQTT_PUBLISH_REFERENCE_TOPIC =
+        "mqtt-write-device-request/virtual-plc/reference";
+    private static final String MQTT_PUBLISH_MAIN_CONTROL_WORD_TOPIC =
+        "mqtt-write-device-request/virtual-plc/main-control-word";
+    private static final String MQTT_SUBSCRIBE_FEEDBACK_TOPIC =
+        "mqtt-subscribe-device-request/virtual-plc/feedback";
+    private static final String MQTT_SUBSCRIBE_FAULT_TOPIC =
+        "mqtt-subscribe-device-request/virtual-plc/fault";
     private static final String MQTT_BROKER = "tcp://localhost:1883";
     private static final String MQTT_USER = "artemis";
     private static final String MQTT_PASSWORD = "artemis";
@@ -81,8 +89,8 @@ class GatewaySeededRouteIntegrationTest {
         try {
             LinkedBlockingQueue<MessageRecord> messages = new LinkedBlockingQueue<>();
             subscriber.setCallback(new QueueingMqttCallback(messages));
-            subscriber.subscribe("virtual_plc_reference", 1);
-            subscriber.subscribe("virtual_plc_maincontrolword", 1);
+            subscriber.subscribe(MQTT_PUBLISH_REFERENCE_TOPIC, 1);
+            subscriber.subscribe(MQTT_PUBLISH_MAIN_CONTROL_WORD_TOPIC, 1);
 
             @SuppressWarnings("unchecked")
             Map<String, Object> result = producer.requestBody(
@@ -96,13 +104,13 @@ class GatewaySeededRouteIntegrationTest {
 
             MessageRecord first = messages.poll(5, TimeUnit.SECONDS);
             MessageRecord second = messages.poll(5, TimeUnit.SECONDS);
-            assertNotNull(first, "Expected MQTT publish for virtual_plc_reference or virtual_plc_maincontrolword");
-            assertNotNull(second, "Expected second MQTT publish for virtual_plc_reference or virtual_plc_maincontrolword");
+            assertNotNull(first, "Expected MQTT publish for write-route topics");
+            assertNotNull(second, "Expected second MQTT publish for write-route topics");
 
             String combined = first.payload + "\n" + second.payload;
             String topics = first.topic + "\n" + second.topic;
-            assertTrue(topics.contains("virtual_plc_reference"));
-            assertTrue(topics.contains("virtual_plc_maincontrolword"));
+            assertTrue(topics.contains(MQTT_PUBLISH_REFERENCE_TOPIC));
+            assertTrue(topics.contains(MQTT_PUBLISH_MAIN_CONTROL_WORD_TOPIC));
             assertTrue(combined.contains(seed("VPL_PARAM_REFERENCE")));
             assertTrue(combined.contains(seed("VPL_PARAM_MAIN_CONTROL_WORD")));
             assertTrue(combined.contains("\"numericValue\":300.0") || combined.contains("\"numericValue\":300"));
@@ -128,8 +136,8 @@ class GatewaySeededRouteIntegrationTest {
 
         MqttClient publisher = mqttClient("seeded-sub-pub-" + TEST_SUFFIX);
         try {
-            publish(publisher, "virtual_plc_feedback", "{\"numericValue\":321.5}");
-            publish(publisher, "virtual_plc_fault", "{\"symbolicValue\":\"Y\"}");
+            publish(publisher, MQTT_SUBSCRIBE_FEEDBACK_TOPIC, "{\"numericValue\":321.5}");
+            publish(publisher, MQTT_SUBSCRIBE_FAULT_TOPIC, "{\"symbolicValue\":\"Y\"}");
         } finally {
             publisher.disconnectForcibly(0, 0, false);
             publisher.close();
@@ -229,9 +237,11 @@ class GatewaySeededRouteIntegrationTest {
             st.executeUpdate("DELETE FROM DEVICE_RULE_SET WHERE DEVICE_RULE_SET_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_REQUEST_ITEM WHERE REQUEST_NAME LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_REQUEST WHERE REQUEST_NAME LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM DEVICE_GROUP_MEMBER WHERE DEVICE_ID LIKE '" + suffixLike + "' OR MEMBER_DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PARAMETER WHERE PARAMETER_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE_CONFIG WHERE DEVICE_CONFIG_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PARAMETER_DEF WHERE PARAMETER_DEF_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM DEVICE_GROUP WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PHYSICAL_DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
         }

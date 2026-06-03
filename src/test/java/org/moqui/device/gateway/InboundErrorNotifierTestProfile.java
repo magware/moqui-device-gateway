@@ -9,12 +9,10 @@ import java.util.Map;
  * Sets gateway.inbound.error.notification.threshold.seconds=0 so the very first
  * recordError() call triggers a notification without waiting 60 s.
  * Redirects notifications to a local SEDA endpoint so the test can consume them.
- * MQTT routes are disabled — no broker is required.
- *
- * Prerequisite: PostgreSQL on localhost:5434 (same as IntegrationTestProfile).
- * Run: mvn test -Dquarkus.profile=integration -Dtest=InboundErrorNotifierTest
+ * MQTT routes are disabled and both datasources are in-memory H2, so no
+ * external broker or database is required.
  */
-public class InboundErrorNotifierTestProfile extends IntegrationTestProfile {
+public class InboundErrorNotifierTestProfile extends LocalNoInfraTestProfile {
 
     static final String NOTIFICATION_SEDA = "seda:test-error-notifications";
 
