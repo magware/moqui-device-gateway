@@ -1,4 +1,4 @@
 target/
 *.class
-data/subscriptions.json
 logs/
+*.log

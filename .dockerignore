@@ -1,0 +1,7 @@
+.git
+target/*
+!target/quarkus-app/
+!target/quarkus-app/**
+logs
+*.log
+README.final (Copy).md
