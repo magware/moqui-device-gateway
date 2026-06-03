@@ -14,33 +14,39 @@ The result is a different class of gateway:
 
 This is the key differentiation: the gateway does not ask developers to draw fragile runtime flows by hand. It lets engineers and AI agents work against a validated industrial data model, then uses Camel to execute that model safely at the edge.
 
-The Moqui database is the source of truth. Camel routes are runtime projections of the model. Local files are not the source of truth for subscriptions.
+The Moqui database is the source of truth. Camel routes are runtime projections of the model.
+
+---
+
+## Model-first before data lake
+
+A `moqui-device` gateway does not start from the idea that industrial data should first be collected into an unstructured data lake and interpreted later. It starts from the device model.
+Devices, PLCs, parameters, recipes, requests, gateway ownership, telemetry, and route activation are linked to explicit model entities from the beginning.
+
+A data lake can still be useful as a downstream analytical or long-term storage layer for raw signals, images, logs, and AI training datasets. However, it is no longer the semantic core of the architecture. The semantic source of truth is the `moqui-device` model; the lake, if present, is a derived storage target.
 
 ---
 
 ## Why this is different from diagram-first gateways
 
-Tools such as Node-RED are useful for quick visual prototyping, but their primary artifact is the diagram. At industrial scale this can become difficult to review, secure, version, validate, and generate automatically. The logic is often distributed across visual nodes and manual wiring decisions.
+Many industrial gateway and low-code tools start from visual flows. The developer connects nodes, wires protocol blocks, adds transformations, and progressively builds a runtime diagram. This can be useful for quick prototypes, but the diagram often becomes the source of truth.
 
-`moqui-device-gateway` uses the opposite approach:
+`moqui-device-gateway` follows a different approach. The source of truth is not a diagram and not an unstructured data lake. The source of truth is the `moqui-device` model stored in the Moqui database.
 
-```text
-Industrial device model -> validated seed data -> runtime Camel routes
-```
+| Aspect                  | Diagram-first gateway                                                  | Data-lake-first approach                              | `moqui-device-gateway`                                                                                                    |
+| ----------------------- | ---------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Primary source of truth | Visual flows manually created by developers                            | Raw data collected first, interpreted later           | Structured industrial device model                                                                                        |
+| Device knowledge        | Spread across diagrams, node settings, scripts, and naming conventions | Often reconstructed after ingestion                   | Explicit `Device`, `PhysicalDevice`, `DeviceGroup`, `ParameterDef`, `DeviceRequest`, `DeviceConfig`, and related entities |
+| Gateway behavior        | Encoded in flow diagrams                                               | Usually outside the lake, in separate ingestion jobs  | Declared as data and executed as Camel routes                                                                             |
+| Semantics               | Implicit in the diagram                                                | Often missing or added later                          | Present before data collection starts                                                                                     |
+| AI assistance           | Must interpret visual flows and ad hoc configuration                   | Must infer meaning from raw tables, topics, and files | Can inspect and generate structured model data                                                                            |
+| Change control          | Flow diff and review can be difficult                                  | Raw data does not describe operational intent         | Database records and seed XML are reviewable, versionable, and auditable                                                  |
+| Runtime execution       | Tool-specific flow runtime                                             | External pipelines and jobs                           | Apache Camel routes with Enterprise Integration Patterns                                                                  |
+| Long-term analytics     | Usually added separately                                               | Central architectural focus                           | Optional downstream sink fed by a model-aware system                                                                      |
 
-This gives several advantages:
+The practical consequence is important: the gateway does not merely move data from PLCs to a database or broker. It executes a modeled industrial system. A telemetry value, a recipe parameter, a PLC request, or a subscription route is not an anonymous data point; it is connected to a device, a parameter definition, a configuration, a request, and a gateway responsibility.
 
-| Area | Diagram-first gateway | moqui-device-gateway |
-|---|---|---|
-| Source of truth | Visual flows | `moqui-device` relational model |
-| PLC/device ownership | Often implicit in the flow | Explicit through `DeviceGroup` / `DeviceGroupMember` |
-| Subscription restore | Usually flow/runtime state | Active `DeviceRequest` rows in the database |
-| AI support | Harder: agents must interpret diagrams | Easier: agents inspect and generate structured data |
-| Review and validation | Manual visual review | SQL/model validation, tests, and AI-assisted checks |
-| Protocol ecosystem | Depends on installed visual nodes | Apache Camel components and EIP |
-| Deployment | Tool-specific runtime | Quarkus JVM/native containers |
-
-The goal is not to replace every quick prototyping tool. The goal is to provide a safer and more deterministic gateway architecture for production industrial systems, where devices, PLCs, telemetry, subscriptions, recipes, and writes must remain consistent over time.
+This is what makes the component model-driven and AI-friendly. AI agents do not have to reverse-engineer the meaning of arbitrary diagrams or unstructured lake records. They can work against explicit model entities, validate completeness, generate seed data, review route intent, and help activate Camel routes from a controlled operational model.
 
 ---
 
@@ -112,7 +118,7 @@ The main rule is:
 
 ```text
 moqui-device model rows = persistent declaration
-Camel routes             = runtime execution
+Camel routes = runtime execution
 ```
 
 ---
@@ -545,8 +551,7 @@ Authorization: Bearer <token>
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/device-request/run/{requestName}` | Execute a `DeviceRequest` already defined in the database. |
-| `POST /api/device-request/unsubscribe/{requestName}` | Stop the current runtime subscription route for a request. |
+| `POST /api/device-request/run/{requestName}` | Execute a `DeviceRequest` already defined in the database, including unsubscribe requests modeled as `DrtUnsubscribe`. |
 | `POST /api/device-config/export` | Export device configuration / recipe data for a device workflow. |
 | `POST /api/device-content/transfer/{requestName}` | Transfer configured file-like device content. |
 
@@ -564,7 +569,17 @@ The gateway enforces scope. A request can run only if its `DEVICE_ID` belongs to
 
 ### Unsubscribe
 
-Unsubscribe stops the current runtime route.
+Unsubscribe is not exposed through a separate REST path in the current gateway implementation.
+
+To stop a runtime subscription route, create or use a `DeviceRequest` whose `REQUEST_TYPE_ENUM_ID` is `DrtUnsubscribe`, then execute it with:
+
+```bash
+curl -X POST \
+  http://localhost:8081/api/device-request/run/{unsubscribeRequestName} \
+  -H 'X-API-Key: change-me'
+```
+
+At runtime, the `run/{requestName}` endpoint dispatches that request to the unsubscribe flow.
 
 It does not permanently deactivate the `DeviceRequest`.
 
