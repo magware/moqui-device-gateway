@@ -2,7 +2,7 @@
 # JVM-mode Dockerfile for moqui-device-gateway (Quarkus).
 #
 # Build the JAR first:
-#   mvn package -DskipTests
+#   ./gradlew quarkusBuild -x test
 #
 # Build the image:
 #   docker build -f src/main/docker/Dockerfile.jvm -t moqui-device-gateway:latest .
@@ -27,10 +27,10 @@ RUN apk add --no-cache curl
 WORKDIR /deployments
 
 # Quarkus fast-jar layout
-COPY --chown=185 target/quarkus-app/lib/                  /deployments/lib/
-COPY --chown=185 target/quarkus-app/*.jar                 /deployments/
-COPY --chown=185 target/quarkus-app/app/                  /deployments/app/
-COPY --chown=185 target/quarkus-app/quarkus/              /deployments/quarkus/
+COPY --chown=185 build/quarkus-app/lib/                  /deployments/lib/
+COPY --chown=185 build/quarkus-app/*.jar                 /deployments/
+COPY --chown=185 build/quarkus-app/app/                  /deployments/app/
+COPY --chown=185 build/quarkus-app/quarkus/              /deployments/quarkus/
 
 # Mount points for external config, logs, and optional non-authoritative runtime data
 RUN mkdir -p /deployments/config /deployments/logs /deployments/data \

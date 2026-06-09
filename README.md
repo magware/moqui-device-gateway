@@ -243,13 +243,13 @@ export GATEWAY_API_AUTH_TOKEN='replace-with-a-real-secret'
 ### 1. Build
 
 ```bash
-mvn clean package
+./gradlew clean build
 ```
 
 ### 2. Run fast tests
 
 ```bash
-mvn test
+./gradlew test
 ```
 
 Fast tests are designed to run without the full Moqui runtime and without external MQTT/OPC UA infrastructure where possible.
@@ -326,7 +326,7 @@ This is the standard local developer mode:
 
 - PostgreSQL via `docker/postgres-compose.yml`
 - ActiveMQ Artemis via `../moqui-framework/docker/activemq-compose.yml`
-- `moqui-device-gateway` running directly on the host JVM with Quarkus/Maven
+- `moqui-device-gateway` running directly on the host JVM with Quarkus/Gradle
 
 In this standard mode, `DeviceRequest.brokerUri` should use `tcp://localhost:1883`.
 
@@ -340,14 +340,14 @@ For local developer startup, use the `local` profile:
 
 ```bash
 GATEWAY_DEVICE_ID=GW_EDGE_01 \
-java -Dquarkus.profile=local -jar target/quarkus-app/quarkus-run.jar
+java -Dquarkus.profile=local -jar build/quarkus-app/quarkus-run.jar
 ```
 
-Equivalent Maven/Quarkus dev-style startup:
+Equivalent Quarkus dev-mode startup:
 
 ```bash
 GATEWAY_DEVICE_ID=GW_EDGE_01 \
-mvn quarkus:dev -Dquarkus.profile=local
+./gradlew quarkusDev -Dquarkus.profile=local
 ```
 
 Default endpoint:
@@ -361,7 +361,7 @@ If you want to start with the default profile instead, use a real token:
 ```bash
 GATEWAY_DEVICE_ID=GW_EDGE_01 \
 GATEWAY_API_AUTH_TOKEN='replace-with-a-real-secret' \
-java -jar target/quarkus-app/quarkus-run.jar
+java -jar build/quarkus-app/quarkus-run.jar
 ```
 
 ### 6. Check readiness
@@ -598,7 +598,7 @@ For request bodies and longer examples, see the running scenarios above.
 ### Fast/local tests
 
 ```bash
-mvn test
+./gradlew test
 ```
 
 These tests should not require a complete Moqui runtime.
@@ -616,10 +616,10 @@ docker compose -f ../moqui-framework/docker/activemq-compose.yml -p moqui-gatewa
 Run examples:
 
 ```bash
-mvn -Dquarkus.profile=integration -Dtest=MqttInboundIntegrationTest test
-mvn -Dquarkus.profile=integration -Dtest=GatewaySeededRouteIntegrationTest test
-mvn -Dquarkus.profile=integration -Dtest=OpcUaGatewayIntegrationTest test
-mvn -Dquarkus.profile=integration -Dtest=PlcLogIngestIntegrationTest test
+./gradlew test --tests '*MqttInboundIntegrationTest' -Dquarkus.profile=integration
+./gradlew test --tests '*GatewaySeededRouteIntegrationTest' -Dquarkus.profile=integration
+./gradlew test --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
+./gradlew test --tests '*PlcLogIngestIntegrationTest' -Dquarkus.profile=integration
 ```
 
 Or use:

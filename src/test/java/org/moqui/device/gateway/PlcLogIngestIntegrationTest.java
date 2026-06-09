@@ -41,7 +41,7 @@ import jakarta.inject.Inject;
  *   docker compose -f ../moqui-framework/docker/activemq-compose.yml -p moqui-gateway up -d
  *
  * Run:
- *   mvn test -Dquarkus.profile=integration -Dtest=PlcLogIngestIntegrationTest
+ *   ./gradlew test --tests '*PlcLogIngestIntegrationTest' -Dquarkus.profile=integration
  */
 @QuarkusTest
 @TestProfile(PlcLogIngestTestProfile.class)

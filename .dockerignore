@@ -1,7 +1,8 @@
 .git
-target/*
-!target/quarkus-app/
-!target/quarkus-app/**
+.gradle
+build/*
+!build/quarkus-app/
+!build/quarkus-app/**
 logs
 *.log
 README.final (Copy).md

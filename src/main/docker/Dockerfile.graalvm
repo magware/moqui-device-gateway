@@ -21,14 +21,16 @@ FROM ghcr.io/graalvm/native-image-community:21 AS builder
 
 WORKDIR /project
 
-# Install Maven in the builder image.
-RUN (microdnf install -y maven findutils tar gzip shadow-utils && microdnf clean all) \
- || (dnf install -y maven findutils tar gzip shadow-utils && dnf clean all)
+# Install Java 21 (required by Gradle wrapper) and Gradle dependencies
+RUN (microdnf install -y findutils tar gzip shadow-utils && microdnf clean all) \
+ || (dnf install -y findutils tar gzip shadow-utils && dnf clean all)
 
-COPY pom.xml /project/
+COPY gradlew /project/
+COPY gradle /project/gradle
+COPY build.gradle settings.gradle /project/
 COPY src /project/src
 
-RUN mvn -B -DskipTests -Dquarkus.native.enabled=true package
+RUN chmod +x gradlew && ./gradlew quarkusBuild -x test -Dquarkus.native.enabled=true --no-daemon
 
 FROM debian:bookworm-slim
 
@@ -41,7 +43,7 @@ RUN apt-get update \
 
 WORKDIR /deployments
 
-COPY --from=builder /project/target/*-runner /deployments/application
+COPY --from=builder /project/build/*-runner /deployments/application
 
 RUN mkdir -p /deployments/config /deployments/logs /deployments/data \
     && chown -R 185:0 /deployments \
