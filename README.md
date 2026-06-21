@@ -405,7 +405,9 @@ Prerequisites:
 
 These examples use `mosquitto_sub` only as an MQTT client CLI tool. The broker used by the standard local setup is ActiveMQ Artemis.
 
-Watch an outbound MQTT topic:
+> **Order matters:** start `mosquitto_sub` before triggering the request, otherwise the messages are published before the subscription is open and nothing is received.
+
+Open the subscription in one terminal:
 
 ```bash
 mosquitto_sub -h 127.0.0.1 -p 1883 \
@@ -413,7 +415,7 @@ mosquitto_sub -h 127.0.0.1 -p 1883 \
   -t 'mqtt-write-device-request/#'
 ```
 
-Run the request:
+Then, in a second terminal, trigger the request:
 
 ```bash
 curl -X POST \
