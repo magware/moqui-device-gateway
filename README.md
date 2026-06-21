@@ -441,7 +441,12 @@ DeviceRequest: subscription request routed through DrrMoquiDeviceGateway
 DeviceRequestItem: subscription items/topics/parameters where required
 ```
 
-Start the gateway. It will restore eligible subscription routes from the database.
+Start the gateway. It will restore eligible subscription routes from the database at startup. The log will confirm which subscriptions were restored:
+
+```text
+Restored DB-defined subscription for DeviceRequest VPL_MQTT_SUB_REQ_01 on startup.
+Gateway GW_EDGE_01 restored 2 DB-defined subscription route(s) from 1 DeviceRequest row(s).
+```
 
 These examples use `mosquitto_pub` only as an MQTT client CLI tool. The broker used by the standard local setup is ActiveMQ Artemis.
 
@@ -454,12 +459,30 @@ mosquitto_pub -h 127.0.0.1 -p 1883 \
   -m '{"parameterId":"VPL_PARAM_FEEDBACK_01","numericValue":12.3,"purposeEnumId":"DrpLogging"}'
 ```
 
-Check the database:
+Verify the value was logged:
 
-```sql
-SELECT * FROM PARAMETER WHERE PARAMETER_ID = 'VPL_PARAM_FEEDBACK_01';
-SELECT * FROM PARAMETER_LOG ORDER BY OBSERVED_DATE DESC;
+```bash
+PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
+  -c "SELECT parameter_id, numeric_value, observed_date FROM PARAMETER_LOG ORDER BY observed_date DESC LIMIT 5;"
 ```
+
+Expected result: a new row with `numeric_value = 12.3` and the current timestamp.
+
+Also check the current parameter value:
+
+```bash
+PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
+  -c "SELECT parameter_id, numeric_value, last_updated_stamp FROM PARAMETER WHERE PARAMETER_ID = 'VPL_PARAM_FEEDBACK_01';"
+```
+
+**Note on `purposeEnumId`:** the payload field `purposeEnumId` controls what the gateway writes:
+
+| `purposeEnumId` | `PARAMETER` updated | `PARAMETER_LOG` written |
+|---|:---:|:---:|
+| `DrpLogging` | No | Yes |
+| any other value (or omitted) | Yes | Yes |
+
+In this example `DrpLogging` is used, so the current value in `PARAMETER` is **not** updated — only the historical log row in `PARAMETER_LOG` is written. This is expected behavior.
 
 ### Scenario C — OPC UA
 
