@@ -582,26 +582,58 @@ PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
 
 ### Scenario D — OPC UA
 
-Use this when `DeviceRequest` / `DeviceRequestItem` rows reference OPC UA node IDs or `DeviceConnection` rows.
+#### Integration test — embedded Milo server (no external OPC UA server needed)
 
-Typical setup:
+The project includes `MiloTestServer`, an embedded Eclipse Milo OPC UA server that starts in-process during `OpcUaGatewayIntegrationTest`. No external OPC UA server or simulator is required to run these tests. The test resolves a free TCP port at runtime and fills in the seed SQL placeholders automatically.
 
-1. create or seed the gateway and PLC devices;
-2. associate them through `DeviceGroup` / `DeviceGroupMember`;
-3. create a `DeviceConnection` for the OPC UA endpoint;
-4. create `DeviceRequest` and `DeviceRequestItem` rows with OPC UA node IDs;
-5. start the OPC UA server or test server;
-6. start the gateway;
-7. trigger the request manually through the REST API. If you want OPC UA subscriptions to be restored at startup, model them with `routerEnumId = DrrMoquiDeviceGateway` and with a request type supported by startup discovery;
-8. verify `Parameter` / `ParameterLog`.
+The embedded server exposes three nodes:
 
-The sample OPC UA seed is:
+| Node identifier | Type | Access | Purpose |
+|---|---|---|---|
+| `virtual_plc_feedback` | Double | Read-only | OPC UA subscribe test (inbound → `PARAMETER`) |
+| `virtual_plc_fault` | String | Read-only | OPC UA subscribe test (inbound → `PARAMETER`) |
+| `virtual_plc_reference_write` | Double | Read-write | OPC UA write test (gateway writes `PARAMETER` value to node) |
+
+To run the OPC UA integration tests:
+
+```bash
+# Infrastructure: PostgreSQL + Artemis must be running (same as Scenario C)
+./gradlew test --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
+```
+
+The tests verify:
+
+1. **subscribe** — gateway subscribes to OPC UA nodes; Milo server pushes new values; gateway writes them into `PARAMETER`;
+2. **write** — gateway reads a `PARAMETER` current value and writes it to the writable OPC UA node.
+
+#### Manual test or production setup with a real OPC UA server
+
+Use this path when `DeviceRequest` / `DeviceRequestItem` rows reference a real OPC UA endpoint and node IDs.
+
+The sample seed is at:
 
 ```text
 src/test/resources/device-gateway-opcua-seed.sql
 ```
 
-It also contains placeholders and must be adapted to the local endpoint and node IDs before use.
+It contains placeholders that must be replaced before use:
+
+| Placeholder | Replace with |
+|---|---|
+| `__SUFFIX__` | your ID suffix, e.g. `01` |
+| `__OPCUA_TRANSPORT_CONFIG__` | OPC UA server address and path, e.g. `192.168.1.100:4840/moqui` |
+| `__OPCUA_FEEDBACK_NODE__` | OPC UA node ID for the feedback parameter, e.g. `ns=2;s=channel1.device1.feedback` |
+| `__OPCUA_FAULT_NODE__` | OPC UA node ID for the fault parameter |
+| `__OPCUA_REFERENCE_WRITE_NODE__` | OPC UA node ID for the write target |
+
+Typical setup once the seed is adapted:
+
+1. seed the database with the filled SQL;
+2. start the OPC UA server;
+3. start the gateway (`local` or production profile);
+4. trigger a subscribe request via the REST API;
+5. verify that `PARAMETER` rows are updated as the OPC UA server publishes new values;
+6. trigger a write request and verify the value on the OPC UA server side.
 
 ### Scenario E — Device configuration / recipe export
 
