@@ -221,8 +221,16 @@ public class GatewayRequestService {
         List<String> readUriList = new ArrayList<>();
         for (String sourceQuery : resolveTopicList(context)) {
             String readUri = buildOpcUaEndpointUri(context, sourceQuery, false);
-            Object payload = producer.requestBodyAndHeader(readUri, null, MiloConstants.HEADER_AWAIT, true);
-            normalizedRows.addAll(normalizeInboundPayload(context, sourceQuery, payload));
+            // MiloClientProducer enters the read path only when CamelMiloNodeIds is present;
+            // body=null alone triggers a write (null value) rather than a read.
+            @SuppressWarnings("unchecked")
+            List<DataValue> readResult = (List<DataValue>) producer.requestBodyAndHeaders(
+                readUri, null,
+                Map.of(MiloConstants.HEADER_NODE_IDS, List.of(sourceQuery),
+                       MiloConstants.HEADER_AWAIT, true));
+            if (readResult != null && !readResult.isEmpty()) {
+                normalizedRows.addAll(normalizeInboundPayload(context, sourceQuery, readResult.get(0)));
+            }
             readUriList.add(readUri);
         }
 

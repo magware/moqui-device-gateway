@@ -118,6 +118,24 @@ class OpcUaGatewayIntegrationTest {
 
     @Test
     @Order(2)
+    void opcuaOneShotReadFetchesCurrentNodeValueIntoParameter() throws Exception {
+        miloTestServer.pushValue(FEEDBACK_ITEM_ID, 55.5);
+
+        GatewayRequestService.RequestContext readCtx = gatewayRequestService.loadRequestContext(seed("VPL_OPCUA_ONESHOT_REQ"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = producer.requestBody(
+            "direct:dispatch-device-request",
+            readCtx,
+            Map.class
+        );
+
+        assertEquals("completed", result.get("status"));
+        assertEquals("opcua-read-device-request", result.get("routeId"));
+        assertEquals(55.5, fetchParameterNumericValue(seed("VPL_PARAM_FEEDBACK")), 0.001);
+    }
+
+    @Test
+    @Order(3)
     void opcuaWritePublishesCurrentParameterValueToServerNode() throws Exception {
         updateParameterNumericValue(seed("VPL_PARAM_REFERENCE"), 88.8);
 

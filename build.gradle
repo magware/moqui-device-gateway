@@ -55,11 +55,25 @@ dependencies {
 test {
     systemProperty 'java.util.logging.manager', 'org.jboss.logmanager.LogManager'
     // Integration tests require live infrastructure (Artemis MQTT + PostgreSQL/YugabyteDB).
-    // Run them explicitly:
-    //   ./gradlew test --tests '*MqttInboundIntegrationTest' -Dquarkus.profile=integration
-    //   ./gradlew test --tests '*GatewaySeededRouteIntegrationTest' -Dquarkus.profile=integration
+    // Run them with the integrationTest task:
+    //   ./gradlew integrationTest --tests '*MqttInboundIntegrationTest' -Dquarkus.profile=integration
+    //   ./gradlew integrationTest --tests '*GatewaySeededRouteIntegrationTest' -Dquarkus.profile=integration
+    //   ./gradlew integrationTest --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
+    //   ./gradlew integrationTest --tests '*PlcLogIngestIntegrationTest' -Dquarkus.profile=integration
     exclude '**/MqttInboundIntegrationTest.class'
     exclude '**/GatewaySeededRouteIntegrationTest.class'
     exclude '**/OpcUaGatewayIntegrationTest.class'
     exclude '**/PlcLogIngestIntegrationTest.class'
+}
+
+tasks.register('integrationTest', Test) {
+    description = 'Runs integration tests that require live infrastructure (PostgreSQL + Artemis).'
+    group = 'verification'
+    systemProperty 'java.util.logging.manager', 'org.jboss.logmanager.LogManager'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    include '**/MqttInboundIntegrationTest.class'
+    include '**/GatewaySeededRouteIntegrationTest.class'
+    include '**/OpcUaGatewayIntegrationTest.class'
+    include '**/PlcLogIngestIntegrationTest.class'
 }

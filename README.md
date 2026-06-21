@@ -1,6 +1,6 @@
 # moqui-device-gateway
 
-`moqui-device-gateway` is a **model-first, model-driven, and data-driven industrial edge gateway** for devices modeled with the `moqui-device` component.
+`moqui-device-gateway` is a **model-first and data-driven industrial edge gateway** for devices modeled with the `moqui-device` component.
 
 Unlike flow-diagram-first tools, where the developer manually builds behavior with ad hoc drag-and-drop flows, this gateway starts from a **shared, relational, industrial device model**. Devices, PLCs, parameters, requests, subscriptions, transport endpoints, gateway ownership, recipes, device configurations, and runtime activation rules are declared as structured data in the Moqui database. Apache Camel routes are then generated and activated as runtime projections of that model.
 
@@ -590,21 +590,22 @@ The embedded server exposes three nodes:
 
 | Node identifier | Type | Access | Purpose |
 |---|---|---|---|
-| `virtual_plc_feedback` | Double | Read-only | OPC UA subscribe test (inbound → `PARAMETER`) |
-| `virtual_plc_fault` | String | Read-only | OPC UA subscribe test (inbound → `PARAMETER`) |
-| `virtual_plc_reference_write` | Double | Read-write | OPC UA write test (gateway writes `PARAMETER` value to node) |
+| `virtual_plc_feedback` | Double | Read-only | one-shot read and subscribe tests (inbound → `PARAMETER`) |
+| `virtual_plc_fault` | String | Read-only | subscribe test (inbound → `PARAMETER`) |
+| `virtual_plc_reference_write` | Double | Read-write | write test (gateway writes `PARAMETER` value to node) |
 
 To run the OPC UA integration tests:
 
 ```bash
 # Infrastructure: PostgreSQL + Artemis must be running (same as Scenario C)
-./gradlew test --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
+./gradlew integrationTest --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
 ```
 
 The tests verify:
 
-1. **subscribe** — gateway subscribes to OPC UA nodes; Milo server pushes new values; gateway writes them into `PARAMETER`;
-2. **write** — gateway reads a `PARAMETER` current value and writes it to the writable OPC UA node.
+1. **one-shot read** (`DrtRead`) — gateway reads the current value of an OPC UA node once and stores it into `PARAMETER`;
+2. **subscribe** (`DrtCyclic`) — gateway creates an OPC UA subscription; Milo server pushes new values; gateway writes them into `PARAMETER`;
+3. **write** (`DrtWrite`) — gateway reads a `PARAMETER` current value and writes it to the writable OPC UA node.
 
 #### Manual test or production setup with a real OPC UA server
 
@@ -759,10 +760,10 @@ docker compose -f ../moqui-framework/docker/activemq-compose.yml -p moqui-gatewa
 Run examples:
 
 ```bash
-./gradlew test --tests '*MqttInboundIntegrationTest' -Dquarkus.profile=integration
-./gradlew test --tests '*GatewaySeededRouteIntegrationTest' -Dquarkus.profile=integration
-./gradlew test --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
-./gradlew test --tests '*PlcLogIngestIntegrationTest' -Dquarkus.profile=integration
+./gradlew integrationTest --tests '*MqttInboundIntegrationTest' -Dquarkus.profile=integration
+./gradlew integrationTest --tests '*GatewaySeededRouteIntegrationTest' -Dquarkus.profile=integration
+./gradlew integrationTest --tests '*OpcUaGatewayIntegrationTest' -Dquarkus.profile=integration
+./gradlew integrationTest --tests '*PlcLogIngestIntegrationTest' -Dquarkus.profile=integration
 ```
 
 Or use:
