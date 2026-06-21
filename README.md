@@ -261,7 +261,7 @@ Five operational parameters are seeded on `VIRTUAL_PLC_01`:
 | `ParameterDef` | `Parameter` | Type | Initial value | Meaning |
 |---|---|---|---|---|
 | `VPL_PD_REFERENCE_01` | `VPL_PARAM_REFERENCE_01` | Decimal | `300.00` | Speed or reference setpoint written to the PLC |
-| `VPL_PD_FEEDBACK_01` | `VPL_PARAM_FEEDBACK_01` | Decimal | `300.03` | Speed or measurement fed back from the PLC |
+| `VPL_PD_FEEDBACK_01` | `VPL_PARAM_FEEDBACK_01` | Decimal | `300.03` | Speed or measurement feedback from the PLC |
 | `VPL_PD_MAIN_CONTROL_WORD_01` | `VPL_PARAM_MAIN_CONTROL_WORD_01` | Text | `START` | Control word sent to the PLC |
 | `VPL_PD_MAIN_STATUS_WORD_01` | `VPL_PARAM_MAIN_STATUS_WORD_01` | Text | `READY` | Status word read from the PLC |
 | `VPL_PD_FAULT_01` | `VPL_PARAM_FAULT_01` | Indicator | `N` | Fault flag (`N` = no fault, `Y` = fault active) |
