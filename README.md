@@ -484,7 +484,103 @@ PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
 
 In this example `DrpLogging` is used, so the current value in `PARAMETER` is **not** updated — only the historical log row in `PARAMETER_LOG` is written. This is expected behavior.
 
-### Scenario C — OPC UA
+### Scenario C — PLC log ingestion
+
+> **Prerequisite:** PLC log ingestion is only available on PLCs that have the [moqui-plc](https://github.com/moqui-industrial/moqui-plc) framework installed. The CODESYS LoggerFacade MQTT appender provided by `moqui-plc` is what generates the structured log payloads described below.
+
+PLC log ingestion routes inbound diagnostic records from a PLC into the database. The transport is MQTT; the `plc-log-consumer` route listens on the topic configured by `plc.log.consume.uri`. In the `local` developer profile the topic is `moqui-plc`.
+
+Typical flow:
+
+```text
+PLC (moqui-plc / CODESYS LoggerFacade)
+  -> MQTT topic: moqui-plc
+  -> plc-log-consumer route
+  -> PARAMETER_LOG  (entries with a non-empty source)
+  -> DEVICE_LOG     (entries with an empty source)
+```
+
+#### Payload format
+
+The PLC publishes a **numbered-object** JSON batch. Each top-level key is a sequential string index (`"1"`, `"2"`, ...); each value is one log entry:
+
+```json
+{
+  "1": {
+    "logEventDate": "DT#2026-05-25-10:00:00",
+    "loggerName":   "hvac_controller",
+    "source":       "tempSensor",
+    "type":         1,
+    "repeatCount":  1,
+    "numericValue": 21.5
+  },
+  "2": {
+    "logEventDate": "DT#2026-05-25-10:00:01",
+    "loggerName":   "hvac_controller",
+    "source":       "",
+    "type":         0,
+    "repeatCount":  1,
+    "message":      "Cycle started."
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `logEventDate` | IEC 61131-3 `DT#YYYY-MM-DD-HH:MM:SS` timestamp |
+| `loggerName` | Logger identifier; used as `deviceId` in `DEVICE_LOG` and as the `parameterId` prefix in `PARAMETER_LOG` |
+| `source` | Data source or sensor name within the logger; empty string means a device-level message with no associated parameter |
+| `type` | `1` = numeric value, `0` = text / symbolic message |
+| `numericValue` | (type 1 only) the numeric measurement |
+| `message` | (type 0 only) the text message |
+| `repeatCount` | Number of consecutive identical events |
+
+#### Routing rules
+
+| `source` field | Route destination | Key used |
+|---|---|---|
+| Non-empty (e.g. `"tempSensor"`) | `PARAMETER_LOG` | `parameterId = {loggerName}.{source}` |
+| Empty (`""`) | `DEVICE_LOG` | `deviceId = loggerName` |
+
+The route auto-creates `ParameterDef` and `Parameter` rows for each `loggerName.source` pair before writing to `PARAMETER_LOG`.
+
+#### Test with mosquitto_pub
+
+The `local` profile starts the `plc-log-consumer` route automatically on `moqui-plc`.
+
+Publish a numeric entry:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 \
+  -u artemis -P artemis \
+  -t 'moqui-plc' \
+  -m '{"1":{"logEventDate":"DT#2026-05-25-10:00:00","loggerName":"hvac_controller","source":"tempSensor","type":1,"repeatCount":1,"numericValue":21.5}}'
+```
+
+Verify `PARAMETER_LOG`:
+
+```bash
+PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
+  -c "SELECT parameter_id, numeric_value, observed_date FROM PARAMETER_LOG WHERE parameter_id LIKE 'hvac_controller.%' ORDER BY observed_date DESC LIMIT 5;"
+```
+
+Publish a device-level (no-source) entry:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 \
+  -u artemis -P artemis \
+  -t 'moqui-plc' \
+  -m '{"1":{"logEventDate":"DT#2026-05-25-10:00:01","loggerName":"hvac_controller","source":"","type":0,"repeatCount":1,"message":"Framework started."}}'
+```
+
+Verify `DEVICE_LOG`:
+
+```bash
+PGPASSWORD=moqui psql -h 127.0.0.1 -p 5432 -U moqui -d moqui \
+  -c "SELECT device_id, payload, observed_date FROM DEVICE_LOG WHERE device_id = 'hvac_controller' ORDER BY observed_date DESC LIMIT 5;"
+```
+
+### Scenario D — OPC UA
 
 Use this when `DeviceRequest` / `DeviceRequestItem` rows reference OPC UA node IDs or `DeviceConnection` rows.
 
@@ -506,20 +602,6 @@ src/test/resources/device-gateway-opcua-seed.sql
 ```
 
 It also contains placeholders and must be adapted to the local endpoint and node IDs before use.
-
-### Scenario D — PLC log ingestion
-
-PLC log ingestion routes inbound diagnostic records into the database.
-
-Typical flow:
-
-```text
-PLC/logger -> MQTT/broker/topic -> Camel route -> DEVICE_LOG or related log table
-```
-
-Use this when PLC runtime logs should be persisted separately from normal parameter telemetry.
-
-Check the configured PLC log topic and payload format in the corresponding `DeviceRequest` and route configuration before testing.
 
 ### Scenario E — Device configuration / recipe export
 
