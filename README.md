@@ -243,8 +243,10 @@ export GATEWAY_API_AUTH_TOKEN='replace-with-a-real-secret'
 ### 1. Build
 
 ```bash
-./gradlew clean build
+./gradlew clean build -x test
 ```
+
+Tests are excluded from the `build` task so that the artifact can be built independently from test execution. This is the standard pattern for Quarkus/Gradle projects.
 
 ### 2. Run fast tests
 
@@ -252,7 +254,9 @@ export GATEWAY_API_AUTH_TOKEN='replace-with-a-real-secret'
 ./gradlew test
 ```
 
-Fast tests are designed to run without the full Moqui runtime and without external MQTT/OPC UA infrastructure where possible.
+Fast tests run without the full Moqui runtime and without external MQTT/OPC UA infrastructure. They are excluded from the `build` task above and must be run explicitly.
+
+> **Note:** Camel logs one expected `ERROR` line ("Failed delivery... Inbound payload must be a Map or List of Map rows") during the `malformedInboundPayloadIsDiscardedWithoutStoppingConsumerRoute` test. This is intentional — the test verifies that a malformed payload is rejected without stopping the consumer route.
 
 ### 3. Start local PostgreSQL
 
