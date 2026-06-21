@@ -131,7 +131,7 @@ Camel routes = runtime execution
 | `PhysicalDevice` | Physical representation of a gateway, PLC, controller, remote IO, drive/inverter, soft starter, servodrive, broker adapter, or other real device. |
 | `DeviceGroup` | Logical group that associates an edge gateway with the PLCs/devices it is responsible for. |
 | `DeviceGroupMember` | Membership and role of each device inside a `DeviceGroup`, including `DgmpEdgeGateway` for the gateway process. |
-| `DeviceRequest` | Declarative request to execute: write, subscribe, unsubscribe, export, transfer, and similar operations. |
+| `DeviceRequest` | Declarative request to execute: read, write, subscribe, unsubscribe, export, transfer, and similar operations. |
 | `DeviceRequestItem` | Parameters, topics, node IDs, or other item-level targets belonging to a request. |
 | `ParameterDef` | Definition of a machine, process, telemetry, command, recipe, or configuration parameter. |
 | `Parameter` | Current value or state of a parameter. |
