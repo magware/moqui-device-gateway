@@ -238,6 +238,77 @@ export GATEWAY_API_AUTH_TOKEN='replace-with-a-real-secret'
 
 ---
 
+## Local test seed data
+
+The SQL files under `src/test/resources` define a self-contained virtual industrial setup used by the local developer workflow and integration tests. All IDs use a `__SUFFIX__` placeholder; the Docker Compose file (`docker/postgres-compose.yml`) expands it to `01`, giving concrete IDs such as `GW_EDGE_01`, `VIRTUAL_PLC_01`, and `VPL_MQTT_SUB_REQ_01`.
+
+### Devices and group
+
+The seed models one edge gateway process and one virtual PLC, associated through a `DeviceGroup`:
+
+```text
+DeviceGroup:  DG_EDGE_01
+  GW_EDGE_01      → DgmpEdgeGateway  (the gateway process)
+  VIRTUAL_PLC_01  → DgmpProcessPLC   (the simulated PLC target)
+```
+
+Both `GW_EDGE_01` and `VIRTUAL_PLC_01` have a matching `Device` + `PhysicalDevice` row.
+
+### Parameters
+
+Five operational parameters are seeded on `VIRTUAL_PLC_01`:
+
+| `ParameterDef` | `Parameter` | Type | Initial value | Meaning |
+|---|---|---|---|---|
+| `VPL_PD_REFERENCE_01` | `VPL_PARAM_REFERENCE_01` | Decimal | `300.00` | Speed or reference setpoint written to the PLC |
+| `VPL_PD_FEEDBACK_01` | `VPL_PARAM_FEEDBACK_01` | Decimal | `300.03` | Speed or measurement fed back from the PLC |
+| `VPL_PD_MAIN_CONTROL_WORD_01` | `VPL_PARAM_MAIN_CONTROL_WORD_01` | Text | `START` | Control word sent to the PLC |
+| `VPL_PD_MAIN_STATUS_WORD_01` | `VPL_PARAM_MAIN_STATUS_WORD_01` | Text | `READY` | Status word read from the PLC |
+| `VPL_PD_FAULT_01` | `VPL_PARAM_FAULT_01` | Indicator | `N` | Fault flag (`N` = no fault, `Y` = fault active) |
+
+### MQTT requests (`device-gateway-seed.sql`)
+
+| `DeviceRequest` | Type | What it does |
+|---|---|---|
+| `VPL_MQTT_PUBLISH_REQ_01` | `DrtWrite` | Publishes `VPL_PARAM_REFERENCE_01` and `VPL_PARAM_MAIN_CONTROL_WORD_01` to MQTT topics under `mqtt-write-device-request/virtual-plc/` |
+| `VPL_MQTT_SUB_REQ_01` | `DrtCyclic` | Subscribes to `mqtt-subscribe-device-request/virtual-plc/feedback` and `.../fault`; inbound values update `VPL_PARAM_FEEDBACK_01` and `VPL_PARAM_FAULT_01` |
+| `VPL_MQTT_UNSUB_REQ_01` | `DrtUnsubscribe` | Tears down the subscription created by `VPL_MQTT_SUB_REQ_01` |
+
+### OPC UA connection and requests (`device-gateway-opcua-seed.sql`)
+
+A `DeviceConnection` (`VPL_OPCUA_CONN_01`) defines the OPC UA TCP endpoint for `VIRTUAL_PLC_01`. Its transport address and node IDs are resolved from placeholders at database initialization time.
+
+| `DeviceRequest` | Type | What it does |
+|---|---|---|
+| `VPL_OPCUA_READ_REQ_01` | `DrtCyclic` | Creates an OPC UA subscription (100 ms sampling) on the feedback and fault nodes; values update `VPL_PARAM_FEEDBACK_01` and `VPL_PARAM_FAULT_01` |
+| `VPL_OPCUA_ONESHOT_REQ_01` | `DrtRead` | Performs a single one-shot read of the feedback node and stores the result in `VPL_PARAM_FEEDBACK_01` |
+| `VPL_OPCUA_WRITE_REQ_01` | `DrtWrite` | Writes the current value of `VPL_PARAM_REFERENCE_01` to the writable OPC UA node |
+| `VPL_OPCUA_UNSUB_REQ_01` | `DrtUnsubscribe` | Tears down the subscription created by `VPL_OPCUA_READ_REQ_01` |
+
+The OPC UA node IDs exposed by the embedded Milo test server are:
+
+| Placeholder | Node ID | Parameter |
+|---|---|---|
+| `__OPCUA_FEEDBACK_NODE__` | `ns=2;s=virtual_plc_feedback` | `VPL_PARAM_FEEDBACK_01` (Double, read-only) |
+| `__OPCUA_FAULT_NODE__` | `ns=2;s=virtual_plc_fault` | `VPL_PARAM_FAULT_01` (String, read-only) |
+| `__OPCUA_REFERENCE_WRITE_NODE__` | `ns=2;s=virtual_plc_reference_write` | `VPL_PARAM_REFERENCE_01` (Double, read-write) |
+
+### Recipe configuration (`device-gateway-seed.sql`)
+
+A minimal recipe is seeded to exercise the device configuration export scenario:
+
+| Entity | ID | Detail |
+|---|---|---|
+| `DeviceConfig` | `VPL_CONFIG_1_01` | Recipe definition (`DctApplyConfig`) for `VIRTUAL_PLC_01` |
+| `Parameter` (recipe) | `VPL_CFG_PARAM_REFERENCE_01` | Decimal `250.0` — recipe reference setpoint |
+| `Parameter` (recipe) | `VPL_CFG_PARAM_STATE_01` | Text `AUTO` — recipe process mode |
+| `DeviceRuleSet` | `VPL_RULESET_1_01` | Binds the recipe to a process context |
+| `DeviceRule` | `VPL_RULE_1_01` | `DrtApplyConfig` rule linking `VPL_CONFIG_1_01` to `VIRTUAL_PLC_01` |
+
+Scenario E (device configuration export) uses `VPL_RULESET_1_01` as input to generate a configuration export from `VPL_CONFIG_1_01`.
+
+---
+
 ## Quick start for developers
 
 ### 1. Build
