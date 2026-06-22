@@ -141,6 +141,7 @@ Camel routes = runtime execution
 | `DeviceRuleSet` | Rule/configuration set used to instantiate or apply a recipe/configuration to a specific device or production context. |
 | `DeviceRule` | Concrete rule or binding that connects a configured process/device behavior to runtime parameters and actions. |
 | `DeviceConnection` | Optional transport connection details, especially useful for OPC UA and direct device links on fieldbus protocols. |
+| `DeviceConfig.approximatedFunctionId` | Optional FK to a `moqui-math` trajectory (`ApproximatedFunction`). When set, the config export generates `Trajectory.*` recipe entries in addition to the regular `Parameter` rows. |
 
 In this model, a recipe is not a separate hand-coded gateway flow. A recipe is a machine-side `DeviceConfig`: a structured configuration of parameters and rules that can be stored, reviewed, versioned, exported, and applied through the same model used for devices, telemetry, and requests. This aligns the gateway with established recipe and batch-management concepts, where configuration, execution, and traceability must stay aligned.
 
@@ -306,6 +307,22 @@ A minimal recipe is seeded to exercise the device configuration export scenario:
 | `DeviceRule` | `VPL_RULE_1_01` | `DrtApplyConfig` rule linking `VPL_CONFIG_1_01` to `VIRTUAL_PLC_01` |
 
 Scenario E (device configuration export) uses `VPL_RULESET_1_01` as input to generate a configuration export from `VPL_CONFIG_1_01`.
+
+### Trajectory export seed data (`device-gateway-seed.sql`)
+
+A minimal motion trajectory is seeded to exercise the trajectory section of the device configuration export:
+
+| Entity | ID | Detail |
+|---|---|---|
+| `DeviceConfig` | `TRJ_CONFIG_1_01` | Config of type `DtRobot` linked to trajectory `TRJ_TEST_01_01` via `approximatedFunctionId` |
+| `DeviceRuleSet` | `TRJ_RULESET_1_01` | Rule set used as input to the export endpoint |
+| `DeviceRule` | `TRJ_RULE_1_01` | `DrtApplyConfig` rule binding `TRJ_CONFIG_1_01` to `VIRTUAL_PLC_01` |
+| `ApproximatedFunctionSample` | `AFS_PT1_01`, `AFS_PT2_01` | Two trajectory waypoints, `sequenceNum` 1 and 2 |
+| `TrajectoryPoint` | (same PKs) | `pt[0]` normal blending, `pt[1]` is a break point (`isBreakPoint = Y`) |
+| `ParametricPathPoint` | `AFS_PT1_01` only | `tolerance = 10.0` → exported as `blendingMode` for `pt[0]`; `pt[1]` defaults to `0.0` |
+| `Vector` / `VectorComponent` | `VEC_PT1_01`, `VEC_PT2_01` | 3 Cartesian dimensions per point (X=100/150, Y=200/250, Z=300/350) |
+
+Scenario E with `TRJ_RULESET_1_01` generates a recipe file containing `Trajectory.*` fields (see below).
 
 ---
 
@@ -711,7 +728,13 @@ Typical setup once the seed is adapted:
 
 Configuration export is used when Moqui stores a device configuration, recipe, or batch-management definition and the gateway must export it for an external PLC/device workflow. In this model, a recipe is a structured machine-side `DeviceConfig`, not a separate visual flow.
 
-Example REST call:
+The export produces one `.txtrecipe` file per priority group, named `{ruleSetName}_p{priority:02d}.txt`. Each line follows the CODESYS `.txtrecipe` format:
+
+```text
+DeviceName.ParameterName:=value
+```
+
+Example REST call (standard recipe):
 
 ```bash
 curl -X POST \
@@ -722,6 +745,61 @@ curl -X POST \
     "deviceRuleSetId":"VPL_RULESET_1_01",
     "deviceId":"VIRTUAL_PLC_01",
     "deviceRuleId":null
+  }'
+```
+
+#### Trajectory export
+
+When `DeviceConfig.approximatedFunctionId` is set, the export appends `Trajectory.*` fields to the recipe file in addition to the regular `Parameter` rows. The trajectory data is read from the `moqui-math` tables (`ApproximatedFunctionSample`, `TrajectoryPoint`, `ParametricPathPoint`, `Vector`, `VectorComponent`) via a single SQL query with CTE-based UNION ALL sections.
+
+The generated recipe fields map directly to the CODESYS `Trajectory` struct declared in `moqui-plc`:
+
+| Recipe field | Source | Notes |
+|---|---|---|
+| `Trajectory.trajectoryId` | `DeviceConfig.approximatedFunctionId` | Trajectory identity |
+| `Trajectory.pointCount` | COUNT of trajectory points | Total waypoints |
+| `Trajectory.points[n].sequenceNum` | `ApproximatedFunctionSample.sequenceNum` | 1-based sequence |
+| `Trajectory.points[n].timeOffsetMs` | `TrajectoryPoint.pointTimeOffsetMillis` | Time offset in ms |
+| `Trajectory.points[n].pos.v[d]` | `VectorComponent.realValue` | Position per dimension index |
+| `Trajectory.points[n].isBreakPoint` | `TrajectoryPoint.isBreakPoint` | `TRUE` / `FALSE` |
+| `Trajectory.points[n].hasBlendingOverride` | `TrajectoryPoint.blendingEnumId IS NOT NULL` | `TRUE` / `FALSE` |
+| `Trajectory.points[n].blendingMode` | `ParametricPathPoint.tolerance` | Defaults to `0.0` when no row exists |
+| `Trajectory.points[n].bufferMode` | `blendingEnumId` (PLCopen `MC_BUFFER_MODE` int) | `PpcmPlcAborting`=0, `PpcmPlcBuffered`=1, `PpcmPlcBlendingLow`=2, `PpcmPlcBlendingPrev`=3, `PpcmPlcBlendingNext`=4, `PpcmPlcBlendingHigh`=5; default 3 |
+| `Trajectory.points[n].transitionMode` | `blendingEnumId` (PLCopen `MC_TRANSITION_MODE` int) | `PpcmPlcTMNone`=0, `PpcmPlcTMCornerDist`=1, `PpcmPlcTMConstVel`=2, `PpcmPlcTMStartVel`=3, `PpcmPlcTMMaxVel`=4; default 0 |
+
+Example recipe output for the trajectory seed (`TRJ_RULESET_1_01`):
+
+```text
+Trajectory.trajectoryId:=TRJ_TEST_01_01
+Trajectory.pointCount:=2
+Trajectory.points[0].blendingMode:=10.000000
+Trajectory.points[0].bufferMode:=3
+Trajectory.points[0].hasBlendingOverride:=FALSE
+Trajectory.points[0].isBreakPoint:=FALSE
+Trajectory.points[0].pos.v[0]:=100.000000
+Trajectory.points[0].pos.v[1]:=200.000000
+Trajectory.points[0].pos.v[2]:=300.000000
+Trajectory.points[0].sequenceNum:=1
+Trajectory.points[0].timeOffsetMs:=500.000000
+Trajectory.points[0].transitionMode:=0
+Trajectory.points[1].blendingMode:=0.000000
+Trajectory.points[1].bufferMode:=3
+Trajectory.points[1].hasBlendingOverride:=FALSE
+Trajectory.points[1].isBreakPoint:=TRUE
+...
+```
+
+The `blendingEnumId` field on `TrajectoryPoint` encodes either a `bufferMode` or a `transitionMode` override using PLCopen-aligned enumerations from `moqui-math` (`PpcmPlcAborting` through `PpcmPlcTMMaxVel`). When `blendingEnumId` is `NULL`, both modes fall back to their defaults (`bufferMode=3` = blending previous, `transitionMode=0` = none).
+
+Example REST call (trajectory export):
+
+```bash
+curl -X POST \
+  http://localhost:8081/api/device-config/export \
+  -H 'Content-Type: application/json' \
+  -H 'X-API-Key: change-me' \
+  -d '{
+    "deviceRuleSetId":"TRJ_RULESET_1_01"
   }'
 ```
 
