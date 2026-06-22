@@ -191,6 +191,44 @@ class GatewaySeededRouteIntegrationTest {
         Files.deleteIfExists(recipePath);
     }
 
+    @Test
+    @Order(4)
+    void exportRouteProducesTrajectoryRecipeData() throws Exception {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> result = producer.requestBody("direct:run-device-config-export",
+            Map.of("deviceRuleSetId", seed("TRJ_RULESET_1")), Map.class);
+
+        assertEquals("completed", result.get("status"));
+
+        @SuppressWarnings("unchecked")
+        java.util.List<Map<String, Object>> files = (java.util.List<Map<String, Object>>) result.get("files");
+        assertNotNull(files, "Response must contain 'files' array");
+        assertEquals(1, files.size(), "Trajectory seed has one priority group");
+
+        Path recipePath = Path.of("target/test-recipes/TrajectoryRuleSet_p01.txt");
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> Files.exists(recipePath));
+        String recipe = Files.readString(recipePath, StandardCharsets.UTF_8);
+
+        assertTrue(recipe.contains("Trajectory.trajectoryId:=TRJ_TEST_01_"),
+            "Recipe must contain trajectoryId");
+        assertTrue(recipe.contains("Trajectory.pointCount:=2"),
+            "Recipe must contain pointCount=2");
+        assertTrue(recipe.contains("Trajectory.points[0].isBreakPoint:=FALSE"),
+            "pt[0] must not be a break point");
+        assertTrue(recipe.contains("Trajectory.points[1].isBreakPoint:=TRUE"),
+            "pt[1] must be a break point");
+        assertTrue(recipe.contains("Trajectory.points[0].sequenceNum:=1"),
+            "pt[0] sequenceNum must be 1");
+        assertTrue(recipe.contains("Trajectory.points[0].pos.v[0]:="),
+            "Recipe must contain position component for pt[0] dim 0");
+        assertTrue(recipe.contains("Trajectory.points[0].blendingMode:=10"),
+            "pt[0] blendingMode must come from PARAMETRIC_PATH_POINT.TOLERANCE=10");
+        assertTrue(recipe.contains("Trajectory.points[1].blendingMode:=0"),
+            "pt[1] blendingMode must default to 0 (no PARAMETRIC_PATH_POINT row)");
+
+        Files.deleteIfExists(recipePath);
+    }
+
     private void runSeedSql() throws Exception {
         String sql = resourceText("device-gateway-seed.sql")
             .replace("__SUFFIX__", TEST_SUFFIX)
@@ -244,6 +282,11 @@ class GatewaySeededRouteIntegrationTest {
             st.executeUpdate("DELETE FROM DEVICE_GROUP WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM PHYSICAL_DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
             st.executeUpdate("DELETE FROM DEVICE WHERE DEVICE_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM VECTOR_COMPONENT WHERE VECTOR_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM VECTOR WHERE VECTOR_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM PARAMETRIC_PATH_POINT WHERE APPROXIMATED_FUNCTION_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM APPROXIMATED_FUNCTION_SAMPLE WHERE APPROXIMATED_FUNCTION_ID LIKE '" + suffixLike + "'");
+            st.executeUpdate("DELETE FROM TRAJECTORY_POINT WHERE APPROXIMATED_FUNCTION_ID LIKE '" + suffixLike + "'");
         }
     }
 
